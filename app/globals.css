@@ -1,0 +1,320 @@
+@import url("https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@300;400;500&display=swap");
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─── Design tokens ─────────────────────────────────── */
+:root {
+  /* shadcn sidebar vars — dark-only app */
+  --sidebar:                  #111111;
+  --sidebar-foreground:       #e4e4e7;
+  --sidebar-primary:          #e4e4e7;
+  --sidebar-primary-foreground: #111111;
+  --sidebar-accent:           #1e1e1e;
+  --sidebar-accent-foreground: #e4e4e7;
+  --sidebar-border:           #222222;
+  --sidebar-ring:             #71717a;
+
+  /* shadcn base tokens */
+  --background:        #0c0c0c;
+  --foreground:        #e4e4e7;
+  --card:              #111111;
+  --card-foreground:   #e4e4e7;
+  --popover:           #1a1a1a;
+  --popover-foreground:#e4e4e7;
+  --primary:           #e4e4e7;
+  --primary-foreground:#0c0c0c;
+  --secondary:         #1e1e1e;
+  --secondary-foreground: #e4e4e7;
+  --muted:             #1a1a1a;
+  --muted-foreground:  #71717a;
+  --accent:            #1e1e1e;
+  --accent-foreground: #e4e4e7;
+  --destructive:       #ef4444;
+  --destructive-foreground: #fff;
+  --border:            #1e1e1e;
+  --input:             #1e1e1e;
+  --ring:              #52525b;
+  --radius:            0.5rem;
+
+  /* Status */
+  --color-success: #4ade80;
+  --color-warning: #fb923c;
+  --color-danger:  #f87171;
+  --color-info:    #60a5fa;
+
+  /* App accent (restrained, single) */
+  --app-accent: #4ade80;
+
+  /* Fonts */
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+}
+
+@theme inline {
+  --color-background:          var(--background);
+  --color-foreground:          var(--foreground);
+  --color-card:                var(--card);
+  --color-card-foreground:     var(--card-foreground);
+  --color-popover:             var(--popover);
+  --color-popover-foreground:  var(--popover-foreground);
+  --color-primary:             var(--primary);
+  --color-primary-foreground:  var(--primary-foreground);
+  --color-secondary:           var(--secondary);
+  --color-secondary-foreground:var(--secondary-foreground);
+  --color-muted:               var(--muted);
+  --color-muted-foreground:    var(--muted-foreground);
+  --color-accent:              var(--accent);
+  --color-accent-foreground:   var(--accent-foreground);
+  --color-destructive:         var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border:              var(--border);
+  --color-input:               var(--input);
+  --color-ring:                var(--ring);
+  --color-sidebar:             var(--sidebar);
+  --color-sidebar-foreground:  var(--sidebar-foreground);
+  --color-sidebar-primary:     var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent:      var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border:      var(--sidebar-border);
+  --color-sidebar-ring:        var(--sidebar-ring);
+  --color-success:             var(--color-success);
+  --color-warning:             var(--color-warning);
+  --color-danger:              var(--color-danger);
+  --color-info:                var(--color-info);
+  --font-sans:  var(--font-sans);
+  --font-mono:  var(--font-mono);
+  --radius-sm:  calc(var(--radius) - 4px);
+  --radius-md:  calc(var(--radius) - 2px);
+  --radius-lg:  var(--radius);
+  --radius-xl:  calc(var(--radius) + 4px);
+}
+
+/* ─── Base ───────────────────────────────────────────── */
+html { min-height: 100%; background: var(--background); overflow-x: hidden; }
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--foreground);
+  background: var(--background);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+@layer base {
+  * { @apply border-border outline-ring/50; }
+  body { @apply bg-background text-foreground; }
+}
+
+/* ─── Typography scale ───────────────────────────────── */
+.text-display {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.text-heading {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.text-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}
+
+/* ─── Stat cards ─────────────────────────────────────── */
+.stat-value {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  font-family: var(--font-mono);
+}
+
+/* ─── Status tags ────────────────────────────────────── */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.tag-success { background: rgba(74,222,128,.08); border-color: rgba(74,222,128,.2); color: var(--color-success); }
+.tag-warning { background: rgba(251,146,60,.08); border-color: rgba(251,146,60,.2); color: var(--color-warning); }
+.tag-danger  { background: rgba(248,113,113,.08); border-color: rgba(248,113,113,.2); color: var(--color-danger); }
+.tag-info    { background: rgba(96,165,250,.08); border-color: rgba(96,165,250,.2); color: var(--color-info); }
+.tag-muted   { background: var(--secondary); border-color: var(--border); color: var(--muted-foreground); }
+
+/* ─── Data table ─────────────────────────────────────── */
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th {
+  padding: 8px 14px;
+  text-align: left;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-foreground);
+  border-bottom: 1px solid var(--border);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
+  vertical-align: middle;
+}
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td { background: var(--secondary); }
+.data-table .mono { font-family: var(--font-mono); font-size: 12px; }
+
+/* ─── Progress bar ───────────────────────────────────── */
+.progress-bar {
+  height: 4px;
+  background: var(--secondary);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--app-accent);
+  transition: width 600ms ease;
+}
+
+/* ─── Topbar ─────────────────────────────────────────── */
+.dash-topbar {
+  height: 48px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  position: sticky;
+  top: 0;
+  background: var(--background);
+  z-index: 20;
+  flex-shrink: 0;
+}
+
+/* ─── Onboarding shell ───────────────────────────────── */
+.onboard-shell {
+  min-height: 100vh;
+  background: var(--background);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+}
+
+/* ─── Step indicator ─────────────────────────────────── */
+.step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 36px;
+}
+
+.step-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--muted-foreground);
+}
+.step-node.active { color: var(--foreground); }
+.step-node.done   { color: var(--color-success); }
+
+.step-circle {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  background: var(--card);
+  flex-shrink: 0;
+}
+.step-node.active .step-circle { border-color: var(--foreground); color: var(--foreground); }
+.step-node.done   .step-circle { border-color: var(--color-success); color: var(--color-success); background: rgba(74,222,128,.08); }
+
+.step-connector {
+  height: 1px;
+  width: 40px;
+  background: var(--border);
+  margin: 0 8px;
+}
+.step-connector.done { background: var(--color-success); }
+
+/* ─── Auth page ──────────────────────────────────────── */
+.auth-page {
+  min-height: 100vh;
+  background: var(--background);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+
+/* ─── Animations ─────────────────────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-up { animation: fade-up 250ms ease forwards; }
+
+.fade-up-1 { animation: fade-up 280ms 40ms ease both; }
+.fade-up-2 { animation: fade-up 280ms 80ms ease both; }
+.fade-up-3 { animation: fade-up 280ms 120ms ease both; }
+.fade-up-4 { animation: fade-up 280ms 160ms ease both; }
+
+/* ─── Misc ───────────────────────────────────────────── */
+.divider { height: 1px; background: var(--border); }
+
+/* ─── Custom scrollbars ──────────────────────────────── */
+/* Global — thin dark scrollbar everywhere */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2e2e2e transparent;
+}
+*::-webkit-scrollbar        { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track  { background: transparent; }
+*::-webkit-scrollbar-thumb  {
+  background: #2e2e2e;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover { background: #3e3e3e; }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* .scroll-thin — even more discreet, for small panels/dropdowns */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #252525 transparent;
+}
+.scroll-thin::-webkit-scrollbar       { width: 3px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 999px;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover { background: #444; }

@@ -1,0 +1,256 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model ExecutionOrganization {
+  id                    String                  @id @default(cuid())
+  slug                  String                  @unique
+  name                  String
+  plan                  String
+  githubAppInstallationId String?
+  githubAppRepositorySelection String?
+  githubAppInstallationUrl String?
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+  repositories          ExecutionRepository[]
+  trendSnapshots        TrendSnapshot[]
+  ingestionCheckpoints  IngestionCheckpoint[]
+  ingestionEvents       IngestionEvent[]
+  ingestionTokens       IngestionToken[]
+}
+
+model ExecutionRepository {
+  id                    String                    @id @default(cuid())
+  organizationId        String
+  organization          ExecutionOrganization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  fullName              String                    @unique
+  name                  String
+  defaultBranch         String
+  visibility            String
+  language              String
+  team                  String
+  selected              Boolean                   @default(false)
+  monthlyCiMinutes      Int
+  monthlyCiSpendUsd     Float
+  p95DurationSec        Int
+  failureRatePct        Float
+  flakeRatePct          Float
+  cacheHitRatePct       Float
+  runnerUtilizationPct  Float
+  telemetryMode         String                    @default("github")
+  telemetryScriptVersion String?
+  lastIndexedAt         DateTime
+  workflowRuns          WorkflowRunSnapshot[]
+  riskAssessments       DeploymentRiskAssessment[]
+  optimizationPlans     OptimizationPlanRecord[]
+  ingestionTokens       IngestionToken[]
+
+  @@index([organizationId])
+}
+
+model WorkflowRunSnapshot {
+  id                 String                 @id @default(cuid())
+  repositoryId       String?
+  repository         ExecutionRepository?    @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  externalRunId      String                 @unique
+  workflowName       String
+  branch             String
+  commitSha          String
+  status             String
+  startedAt          DateTime
+  durationSec        Int
+  containerLayerReuse Float
+  changedFiles       Json
+  jobs               Json
+  tests              Json
+  telemetrySource    String                 @default("github")
+  telemetryWrapperVersion String?
+  runtimeTelemetry   Json?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  aiScanResult       AiScanResult?
+
+  @@index([repositoryId, startedAt])
+}
+
+model AiScanResult {
+  id              String                @id @default(cuid())
+  runExternalId   String                @unique
+  run             WorkflowRunSnapshot   @relation(fields: [runExternalId], references: [externalRunId], onDelete: Cascade)
+  issues          Json
+  createdAt       DateTime              @default(now())
+}
+
+
+model TrendSnapshot {
+  id              String                @id @default(cuid())
+  organizationId  String
+  organization    ExecutionOrganization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  label           String
+  durationSec     Int
+  cacheHitPct     Float
+  failureRiskPct   Float
+  createdAt       DateTime              @default(now())
+
+  @@index([organizationId, createdAt])
+}
+
+model OptimizationPlanRecord {
+  id                          String                @id @default(cuid())
+  repositoryId                String
+  repository                  ExecutionRepository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  sourceRunExternalId         String
+  actionId                    String
+  title                       String
+  body                        String
+  risk                        String
+  estimatedTimeSavingsPct     Float
+  estimatedCostSavingsUsdMonthly Float
+  branchName                  String
+  baseBranch                  String
+  files                       Json
+  guardrails                  Json
+  liveCreationEnabled         Boolean               @default(false)
+  githubPullRequestNumber     Int?
+  githubPullRequestUrl        String?
+  createdAt                   DateTime              @default(now())
+
+  @@index([repositoryId, createdAt])
+}
+
+model DeploymentRiskAssessment {
+  id                   String                @id @default(cuid())
+  repositoryId         String
+  repository           ExecutionRepository   @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  runExternalId        String
+  score                Float
+  rollbackProbability  Float
+  severity             String
+  rationale            Json
+  createdAt            DateTime              @default(now())
+
+  @@index([repositoryId, createdAt])
+}
+
+model IngestionCheckpoint {
+  id                  String                @id @default(cuid())
+  organizationId      String
+  organization        ExecutionOrganization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  syncCursor          String
+  eventsProcessed24h  Int
+  webhookDeliveryPct   Float
+  checks              Json
+  status              String
+  createdAt           DateTime              @default(now())
+
+  @@index([organizationId, createdAt])
+}
+
+model IngestionEvent {
+  id              String                @id @default(cuid())
+  organizationId  String?
+  organization    ExecutionOrganization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  repositoryFullName String?
+  externalRunId   String?
+  idempotencyKey  String?               @unique
+  eventType       String
+  source          String
+  status          String
+  error           String?
+  payload         Json
+  receivedAt      DateTime              @default(now())
+  processedAt     DateTime?
+
+  @@index([organizationId, receivedAt])
+  @@index([repositoryFullName, externalRunId])
+  @@index([eventType, status])
+}
+
+model IngestionToken {
+  id              String                @id @default(cuid())
+  organizationId  String
+  organization    ExecutionOrganization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  repositoryId    String?
+  repository      ExecutionRepository?  @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  name            String
+  scope           String
+  tokenHash       String                @unique
+  tokenPrefix     String
+  lastFour        String
+  status          String                @default("active")
+  expiresAt       DateTime?
+  lastUsedAt      DateTime?
+  createdAt       DateTime              @default(now())
+  revokedAt       DateTime?
+
+  @@index([organizationId, status])
+  @@index([repositoryId, status])
+}
+
+model User {
+  id            String    @id
+  name          String
+  email         String
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
