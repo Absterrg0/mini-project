@@ -1,10 +1,12 @@
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, revalidateTag } from "next/cache";
 import { auth } from "@/lib/auth";
 import { loadOptimizationContext, loadExecutionSnapshot } from "@/lib/execution-store";
 import { COOKIE_NAME, type AISettings, buildAIModel } from "@/lib/ai-provider";
 import { generateText } from "ai";
+import { getCleanErrorMessage } from "@/lib/api-errors";
+import { parseJsonWithRepair } from "@/lib/json-model-parse";
 import type { WorkflowRun, RepositoryProfile } from "@/app/lib/types";
 
 interface RequestBody {
@@ -25,6 +27,7 @@ Think about: infrastructure patterns, security, cost, reliability, developer exp
 
 ## CONSTRAINTS
 - Return ONLY valid JSON — no markdown fences, no prose, no explanation outside the JSON.
+- String values must be valid JSON strings: use \\n for newlines, \\t for tabs, and \\" for quotes inside text — never raw line breaks inside quotes.
 - Each issue must have a unique id (snake_case), a title (≤80 chars), severity (warning|danger), and a concrete action.
 - Every recommendation must be backed by data from the telemetry provided — no generic advice.
 - If there is genuinely nothing to add beyond what the rule engine already found, return { "issues": [] }.
@@ -148,6 +151,58 @@ function getAISettings(cookieHeader: string): AISettings | null {
   }
 }
 
+function normalizeIssue(rawIssue: any, index: number, repository: RepositoryProfile, run: WorkflowRun) {
+  const rawAction = rawIssue?.action ?? {};
+  const estimatedTimeSavingsPct = Number.isFinite(Number(rawAction.estimatedTimeSavingsPct))
+    ? Math.max(1, Math.round(Number(rawAction.estimatedTimeSavingsPct)))
+    : Math.max(5, Math.min(35, Math.round((run.totalDurationSec / Math.max(repository.p95DurationSec, 1)) * 10)));
+  const developerHourlyCostUsd = 85;
+  const monthlyRunCount = Math.max(20, Math.round((repository.monthlyCiMinutes * 60) / Math.max(run.totalDurationSec, 1)));
+  const monthlySavedMinutes = (run.totalDurationSec * (estimatedTimeSavingsPct / 100) * monthlyRunCount) / 60;
+  const inferredCostSavings = Math.round(
+    Math.max(
+      15 + estimatedTimeSavingsPct * 2,
+      repository.monthlyCiSpendUsd * (estimatedTimeSavingsPct / 100),
+      monthlySavedMinutes * 0.45 * (developerHourlyCostUsd / 60),
+    ),
+  );
+  const modelCostSavings = Number(rawAction.estimatedCostSavingsUsdMonthly);
+  const estimatedCostSavingsUsdMonthly =
+    Number.isFinite(modelCostSavings) && modelCostSavings > 0
+      ? Math.max(Math.round(modelCostSavings), inferredCostSavings)
+      : inferredCostSavings;
+  const id = String(rawIssue?.id || rawAction.id || `ai_issue_${index + 1}`)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  return {
+    ...rawIssue,
+    id,
+    severity: rawIssue?.severity === "danger" ? "danger" : "warning",
+    title: String(rawIssue?.title || rawAction.title || "AI optimization opportunity").slice(0, 80),
+    detail: String(
+      rawIssue?.detail ||
+        `This recommendation is based on workflow duration ${run.totalDurationSec}s and monthly CI spend $${repository.monthlyCiSpendUsd}/mo.`,
+    ),
+    action: {
+      ...rawAction,
+      id: String(rawAction.id || id),
+      title: String(rawAction.title || rawIssue?.title || "Apply AI optimization").slice(0, 80),
+      rationale: String(
+        rawAction.rationale ||
+          rawIssue?.detail ||
+          `Expected to reduce this CI path by about ${estimatedTimeSavingsPct}% based on observed telemetry.`,
+      ),
+      estimatedTimeSavingsPct,
+      estimatedCostSavingsUsdMonthly,
+      risk: ["low", "medium", "high"].includes(rawAction.risk) ? rawAction.risk : "medium",
+      filesToChange: Array.isArray(rawAction.filesToChange) ? rawAction.filesToChange : [],
+      isAiGenerated: true,
+    },
+  };
+}
+
 export async function POST(request: Request) {
   const session = await auth.api.getSession({ headers: await headers() });
   if (!session) {
@@ -184,12 +239,16 @@ export async function POST(request: Request) {
     const { prisma } = await import("@/lib/prisma");
 
     const existingScan = await prisma.aiScanResult.findUnique({
-      where: { runExternalId: run.id }
+      where: { runExternalId: run.id },
     });
     const existingIssues = existingScan?.issues ? (existingScan.issues as any[]) : [];
+    const prevScannedSha = existingScan?.scannedCommitSha ?? null;
+    /** New commit on the same workflow run — replace cached issues instead of merging stale rows. */
+    const replaceEntirely =
+      !existingScan || (prevScannedSha != null && prevScannedSha !== run.commitSha);
 
     const model = buildAIModel(aiSettings);
-    const userPrompt = buildPromptWithExisting(run, allRepoRuns, repository, existingIssues);
+    const userPrompt = buildPromptWithExisting(run, allRepoRuns, repository, replaceEntirely ? [] : existingIssues);
 
     const { text } = await generateText({
       model,
@@ -207,9 +266,13 @@ export async function POST(request: Request) {
 
     let parsed: { issues: unknown[] };
     try {
-      parsed = JSON.parse(cleaned) as { issues: unknown[] };
-    } catch {
-      console.error("[ai-scan] Invalid JSON from model:", cleaned.slice(0, 200));
+      const data = parseJsonWithRepair(cleaned) as { issues?: unknown };
+      if (!Array.isArray(data.issues)) {
+        throw new Error("Missing issues array");
+      }
+      parsed = { issues: data.issues };
+    } catch (e) {
+      console.error("[ai-scan] Invalid JSON from model:", cleaned.slice(0, 400), e);
       return NextResponse.json({ error: "AI model returned malformed response. Try again." }, { status: 500 });
     }
 
@@ -217,37 +280,40 @@ export async function POST(request: Request) {
       return NextResponse.json({ issues: [] });
     }
 
-    // Flag them so the frontend knows they came from AI
-    const issuesWithFlag = parsed.issues.map((i: any) => ({
-      ...i,
-      action: {
-        ...(i.action || {}),
-        isAiGenerated: true,
-      }
-    }));
-
-    // Deduplicate against existing issues
-    const existingTitles = new Set(existingIssues.map((i) => i.title.toLowerCase()));
-    const existingIds = new Set(existingIssues.map((i) => i.id));
-    const newUniqueIssues = issuesWithFlag.filter(
-      (i) => !existingTitles.has(i.title.toLowerCase()) && !existingIds.has(i.id)
+    const issuesWithFlag = parsed.issues.map((issue, index) =>
+      normalizeIssue(issue, index, repository, run),
     );
 
-    const combinedIssues = [...existingIssues, ...newUniqueIssues];
+    const existingTitles = new Set(existingIssues.map((i) => String(i.title ?? "").toLowerCase()));
+    const existingIds = new Set(existingIssues.map((i) => String(i.id ?? "")));
+    const newUniqueIssues = replaceEntirely
+      ? issuesWithFlag
+      : issuesWithFlag.filter(
+          (i) => !existingTitles.has(i.title.toLowerCase()) && !existingIds.has(i.id),
+        );
+
+    const combinedIssues = replaceEntirely ? issuesWithFlag : [...existingIssues, ...newUniqueIssues];
 
     await prisma.aiScanResult.upsert({
       where: { runExternalId: run.id },
-      create: { runExternalId: run.id, issues: combinedIssues as any },
-      update: { issues: combinedIssues as any },
+      create: {
+        runExternalId: run.id,
+        issues: combinedIssues as any,
+        scannedCommitSha: run.commitSha,
+      },
+      update: {
+        issues: combinedIssues as any,
+        scannedCommitSha: run.commitSha,
+      },
     });
 
     revalidatePath("/dashboard/pr-agent");
+    revalidateTag("execution-snapshot", "max");
 
     return NextResponse.json({ issues: newUniqueIssues });
 
   } catch (error) {
-    const msg = error instanceof Error ? error.message : "Unknown error";
-    console.error("[ai-scan] Error:", msg);
-    return NextResponse.json({ error: `AI scan failed: ${msg}` }, { status: 500 });
+    const msg = getCleanErrorMessage(error, "AI scan failed to process.");
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

@@ -60,6 +60,11 @@ export function OverviewClient({
     .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
     .slice(0, 10);
 
+  const repositoryById =
+    org?.repositories?.length ?
+      Object.fromEntries(org.repositories.map((r) => [r.id, r.fullName]))
+    : undefined;
+
   const hasEnriched = repoRuns.some((r) => r.telemetrySource === "execforge-wrapper");
   const enrichedRuns = chronoRuns.filter((r) => r.telemetrySource === "execforge-wrapper");
 
@@ -221,7 +226,11 @@ export function OverviewClient({
           </Link>
         </CardHeader>
         <CardContent className="p-0">
-          <RunsAccordion runs={recentRuns} emptyMessage="No runs for this repository yet." />
+          <RunsAccordion
+            runs={recentRuns}
+            repositoryById={repositoryById}
+            emptyMessage="No runs for this repository yet."
+          />
         </CardContent>
       </Card>
     </div>

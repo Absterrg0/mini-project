@@ -93,6 +93,10 @@ export interface WorkflowRun {
   telemetryWrapperVersion?: string;
   runtimeTelemetry?: RuntimeTelemetry;
   aiScanResult?: unknown;
+  /** Commit captured when AI scan issues were last persisted; differs from `commitSha` when telemetry moved on. */
+  aiScanScannedCommitSha?: string | null;
+  /** Persisted AI narrative analysis for this run. */
+  runAnalysis?: { markdown: string; model: string; createdAt: string } | null;
 }
 
 export interface OptimizationAction {

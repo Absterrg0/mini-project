@@ -1,4 +1,4 @@
-import { loadExecutionSnapshot } from "@/lib/execution-store";
+import { loadExecutionSnapshot, loadExistingPlans } from "@/lib/execution-store";
 import { estimateSimulation } from "@/app/lib/intelligence";
 import { deriveOptimizations } from "@/app/lib/analysis";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -6,6 +6,7 @@ import { Separator } from "@/components/ui/separator";
 import { AlertTriangle, Sparkles } from "lucide-react";
 import { PrAgentClient } from "@/components/dashboard/pr-agent-client";
 import { AIScanButton } from "@/components/dashboard/ai-scan-button";
+import { isAiScanStaleForRun } from "@/lib/ai-scan-stale";
 
 
 export default async function PrAgentPage({
@@ -81,6 +82,16 @@ export default async function PrAgentPage({
     parallelizeE2E,
   });
 
+  const aiScanStale = isAiScanStaleForRun(latestRun);
+
+  let initialExistingPlans: Awaited<ReturnType<typeof loadExistingPlans>> = [];
+  if (repo) {
+    initialExistingPlans = await loadExistingPlans({
+      repositoryFullName: repo.fullName,
+      runId: latestRun.id,
+    });
+  }
+
   return (
     <div className="fade-up">
       <header className="dash-topbar">
@@ -96,7 +107,12 @@ export default async function PrAgentPage({
           )}
         </div>
         {repo && latestRun ? (
-          <AIScanButton repositoryFullName={repo.fullName} runId={latestRun.id} alreadyScanned={!!latestRun.aiScanResult} />
+          <AIScanButton
+            repositoryFullName={repo.fullName}
+            runId={latestRun.id}
+            alreadyScanned={Array.isArray(latestRun.aiScanResult)}
+            showStalePrompt={aiScanStale}
+          />
         ) : (
           <span className="tag tag-info font-mono text-[11px]">
             <Sparkles size={10} /> AI-powered
@@ -112,6 +128,7 @@ export default async function PrAgentPage({
           actions={actions}
           simulation={simulation}
           highlightActionId={params.action}
+          initialExistingPlans={initialExistingPlans}
         />
       )}
 

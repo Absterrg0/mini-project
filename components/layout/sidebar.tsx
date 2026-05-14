@@ -2,13 +2,21 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import {
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useCallback,
+  useLayoutEffect,
+} from "react";
+import type { CSSProperties } from "react";
+import type { LucideIcon } from "lucide-react";
 import {
   LayoutDashboard,
   GitCommitHorizontal,
   FlaskConical,
   GitPullRequest,
-  Webhook,
   Settings,
   LogOut,
   ChevronsUpDown,
@@ -59,6 +67,130 @@ const NAV_SYSTEM = [
   { href: "/dashboard/examples", label: "Examples", icon: BookOpen },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
+
+type NavMenuItem = {
+  href: string;
+  label: string;
+  icon: LucideIcon;
+  exact?: boolean;
+};
+
+/** One shared hover/active background so adjacent rounded rows never stack. */
+function NavMenuWithSlidingPill({
+  items,
+  repoHref,
+  pathname,
+}: {
+  items: readonly NavMenuItem[];
+  repoHref: (base: string) => string;
+  pathname: string;
+}) {
+  const navRef = useRef<HTMLUListElement>(null);
+  const rowRefs = useRef<(HTMLSpanElement | null)[]>([]);
+  const [hoverRow, setHoverRow] = useState<number | null>(null);
+  const [focusRow, setFocusRow] = useState<number | null>(null);
+  const [pill, setPill] = useState({ top: 0, height: 0, opacity: 0 });
+
+  const activeIndex = useMemo(() => {
+    const i = items.findIndex((item) =>
+      item.exact ? pathname === item.href : pathname.startsWith(item.href),
+    );
+    return i;
+  }, [items, pathname]);
+
+  const targetRow = hoverRow ?? focusRow ?? (activeIndex >= 0 ? activeIndex : null);
+
+  const syncPill = useCallback(() => {
+    const ul = navRef.current;
+    const idx = targetRow;
+    const li = idx !== null ? rowRefs.current[idx] : null;
+    if (!ul || !li) {
+      setPill((p) => ({ ...p, opacity: 0 }));
+      return;
+    }
+    const ur = ul.getBoundingClientRect();
+    const lr = li.getBoundingClientRect();
+    setPill({
+      top: lr.top - ur.top + ul.scrollTop,
+      height: lr.height,
+      opacity: 1,
+    });
+  }, [targetRow]);
+
+  useLayoutEffect(() => {
+    syncPill();
+  }, [syncPill, pathname, items.length]);
+
+  useEffect(() => {
+    const ul = navRef.current;
+    if (!ul) return;
+    const ro = new ResizeObserver(() => syncPill());
+    ro.observe(ul);
+    window.addEventListener("resize", syncPill);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", syncPill);
+    };
+  }, [syncPill]);
+
+  const setRowRef = (index: number) => (el: HTMLSpanElement | null) => {
+    rowRefs.current[index] = el;
+  };
+
+  return (
+    <ul
+      ref={navRef}
+      data-slot="sidebar-menu"
+      data-sidebar="menu"
+      className="relative flex w-full min-w-0 flex-col gap-0 after:pointer-events-none after:absolute after:inset-x-0 after:z-0 after:rounded-md after:bg-sidebar-accent after:content-[''] after:top-[var(--pill-top)] after:h-[var(--pill-h)] after:opacity-[var(--pill-op)] after:motion-safe:transition-[top,height,opacity] after:motion-safe:duration-200 after:motion-safe:ease-out after:motion-reduce:transition-none"
+      style={
+        {
+          ["--pill-top" as string]: `${pill.top}px`,
+          ["--pill-h" as string]: `${pill.height}px`,
+          ["--pill-op" as string]: String(pill.opacity),
+        } as CSSProperties
+      }
+    >
+      {items.map(({ href, label, icon: Icon, exact }, i) => {
+        const routeActive = exact ? pathname === href : pathname.startsWith(href);
+        return (
+          <SidebarMenuItem key={href} className="relative z-10">
+            <span
+              ref={setRowRef(i)}
+              className="block w-full"
+              onMouseEnter={() => setHoverRow(i)}
+              onMouseLeave={(e) => {
+                if (!navRef.current?.contains(e.relatedTarget as Node | null)) {
+                  setHoverRow(null);
+                }
+              }}
+              onFocusCapture={() => setFocusRow(i)}
+              onBlurCapture={(e) => {
+                const next = e.relatedTarget as Node | null;
+                if (!navRef.current?.contains(next)) setFocusRow(null);
+              }}
+            >
+              <SidebarMenuButton
+                isActive={routeActive}
+                tooltip={label}
+                className="relative z-10 text-sidebar-foreground/70 hover:bg-transparent hover:text-sidebar-accent-foreground data-[active=true]:bg-transparent data-[active=true]:text-sidebar-foreground data-active:bg-transparent data-active:text-sidebar-foreground active:bg-transparent"
+                render={
+                  <Link
+                    href={repoHref(href)}
+                    aria-current={routeActive ? "page" : undefined}
+                  />
+                }
+              >
+                <Icon size={15} strokeWidth={1.5} />
+                <span>{label}</span>
+              </SidebarMenuButton>
+            </span>
+          </SidebarMenuItem>
+        );
+      })}
+    </ul>
+  );
+}
 
 // ─── Repo picker dropdown ──────────────────────────────────────────────────────
 
@@ -235,11 +367,6 @@ export function AppSidebar({ userName, userEmail, userImage, orgName, repos = []
     [activeRepoId, searchParams],
   );
 
-  function isActive(href: string, exact = false) {
-    if (exact) return pathname === href;
-    return pathname.startsWith(href);
-  }
-
   function selectRepo(id: string) {
     setSelectedRepoId(id);
     const params = new URLSearchParams(searchParams.toString());
@@ -287,21 +414,11 @@ export function AppSidebar({ userName, userEmail, userImage, orgName, repos = []
         {/* Main nav */}
         <SidebarGroup className="pt-1">
           <SidebarGroupContent>
-            <SidebarMenu>
-              {NAV_MAIN.map(({ href, label, icon: Icon, exact }) => (
-                <SidebarMenuItem key={href}>
-                  <SidebarMenuButton
-                    isActive={isActive(href, exact)}
-                    tooltip={label}
-                    className="text-sidebar-foreground/70 data-[active=true]:text-sidebar-foreground data-[active=true]:bg-sidebar-accent"
-                    render={<Link href={repoHref(href)} />}
-                  >
-                    <Icon size={15} strokeWidth={1.5} />
-                    <span>{label}</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
+            <NavMenuWithSlidingPill
+              items={NAV_MAIN}
+              repoHref={repoHref}
+              pathname={pathname}
+            />
           </SidebarGroupContent>
         </SidebarGroup>
 
@@ -313,21 +430,11 @@ export function AppSidebar({ userName, userEmail, userImage, orgName, repos = []
             System
           </SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu>
-              {NAV_SYSTEM.map(({ href, label, icon: Icon }) => (
-                <SidebarMenuItem key={href}>
-                  <SidebarMenuButton
-                    isActive={isActive(href)}
-                    tooltip={label}
-                    className="text-sidebar-foreground/70 data-[active=true]:text-sidebar-foreground data-[active=true]:bg-sidebar-accent"
-                    render={<Link href={repoHref(href)} />}
-                  >
-                    <Icon size={15} strokeWidth={1.5} />
-                    <span>{label}</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
+            <NavMenuWithSlidingPill
+              items={NAV_SYSTEM}
+              repoHref={repoHref}
+              pathname={pathname}
+            />
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>

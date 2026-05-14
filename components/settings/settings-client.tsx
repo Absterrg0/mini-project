@@ -5,7 +5,7 @@ import {
   Key, Plus, Trash2, Copy, Check, Eye, EyeOff,
   Loader2, Clock, Shield, X, GitBranch, RefreshCw,
   AlertTriangle, ChevronRight, BrainCircuit, CheckCircle2,
-  User, Cpu,
+  User, Cpu, Info,
 } from "lucide-react";
 
 
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 
 
@@ -583,16 +584,42 @@ function BYOKSection() {
 
         {/* API Key */}
         <div>
-          <label className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider mb-2 block">
-            {AI_MODELS[provider].label} API Key
-          </label>
+          <div className="mb-2 flex items-center gap-1.5">
+            <label
+              htmlFor="byok-api-key"
+              className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider"
+            >
+              {AI_MODELS[provider].label} API Key
+            </label>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label="How your API key is stored"
+                    className="inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  >
+                    <Info size={12} aria-hidden />
+                  </button>
+                }
+              />
+              <TooltipContent side="top" className="max-w-[260px] text-xs leading-relaxed">
+                Stored in an httpOnly cookie on this device only. It is not readable from page scripts and is only sent to the server over HTTPS when you save or run AI features.
+              </TooltipContent>
+            </Tooltip>
+          </div>
 
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Input type={showKey ? "text" : "password"} value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+          <div className="flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Input
+                id="byok-api-key"
+                type={showKey ? "text" : "password"}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
                 placeholder={saved?.configured ? "Enter new key to replace…" : `Your ${AI_MODELS[provider].label} API key`}
                 className="font-mono text-xs pr-9 bg-white/[0.04] border-white/[0.07]"
-                onKeyDown={(e) => e.key === "Enter" && handleSave()} />
+                onKeyDown={(e) => e.key === "Enter" && handleSave()}
+              />
               <button type="button" onClick={() => setShowKey((v) => !v)}
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
                 {showKey ? <EyeOff size={12} /> : <Eye size={12} />}
@@ -603,9 +630,6 @@ function BYOKSection() {
               Save
             </Button>
           </div>
-          <p className="text-[10px] text-muted-foreground mt-2">
-            Stored in an httpOnly cookie on this device only.
-          </p>
         </div>
       </div>
     </div>

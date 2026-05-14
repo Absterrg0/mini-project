@@ -77,6 +77,91 @@ jobs:
 `;
   }
 
+  if (action.id === "split-workflow-jobs") {
+    return `name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+`;
+  }
+
+  if (action.id === "optimize-artifacts") {
+    return `name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ci-diagnostics-\${{ github.run_id }}
+          path: |
+            test-results/**
+            coverage/**
+            playwright-report/**
+          if-no-files-found: ignore
+          retention-days: 7
+`;
+  }
+
   return `name: ci
 
 on:
@@ -301,6 +386,28 @@ function fileChanges(action: OptimizationAction, run: WorkflowRun): PullRequestF
         path: ".github/workflows/ci.yml",
         operation: "update",
         summary: "Keep CI deterministic while flaky tests are stabilized.",
+        content: workflowYaml(action, run),
+      },
+    ];
+  }
+
+  if (action.id === "split-workflow-jobs") {
+    return [
+      {
+        path: ".github/workflows/ci.yml",
+        operation: "update",
+        summary: "Split the monolithic workflow into parallel lint, test, and build jobs.",
+        content: workflowYaml(action, run),
+      },
+    ];
+  }
+
+  if (action.id === "optimize-artifacts") {
+    return [
+      {
+        path: ".github/workflows/ci.yml",
+        operation: "update",
+        summary: "Restrict artifact uploads to failure diagnostics with shorter retention.",
         content: workflowYaml(action, run),
       },
     ];

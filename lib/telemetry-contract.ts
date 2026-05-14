@@ -5,6 +5,46 @@ export const RUNTIME_ACTION_VERSION = "1.0.0";
 export const MAX_RUNTIME_SAMPLES = 720;
 export const MAX_ANNOTATIONS = 100;
 
+/** True when persisted JSON clearly came from the ExecForge runtime collector. */
+export function isExecForgeEnrichedRuntime(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const o = value as Record<string, unknown>;
+  if (o.source === "execforge-wrapper") {
+    return true;
+  }
+  if (
+    typeof o.wrapperVersion === "string" &&
+    o.wrapperVersion.length > 0 &&
+    Array.isArray(o.samples) &&
+    o.samples.length > 0
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Prefer the DB column, but recover from cases where runtime JSON is enriched
+ * while `telemetrySource` still says "github" (e.g. a merge race with webhook ingestion).
+ */
+export function deriveWorkflowRunTelemetrySource(
+  columnSource: string | undefined,
+  runtimeTelemetry: unknown,
+): "github" | "execforge-wrapper" | undefined {
+  if (columnSource === "execforge-wrapper") {
+    return "execforge-wrapper";
+  }
+  if (isExecForgeEnrichedRuntime(runtimeTelemetry)) {
+    return "execforge-wrapper";
+  }
+  if (columnSource === "github") {
+    return "github";
+  }
+  return columnSource as "github" | "execforge-wrapper" | undefined;
+}
+
 export interface ValidationResult<T> {
   ok: boolean;
   value?: T;

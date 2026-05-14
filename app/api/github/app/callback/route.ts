@@ -7,6 +7,7 @@ import {
   GitHubAppConfigurationError,
   syncInstallationRepositories,
 } from "@/lib/github-app";
+import { getCleanErrorMessage } from "@/lib/api-errors";
 
 /**
  * GitHub App post-installation callback.
@@ -50,8 +51,7 @@ export async function GET(request: Request) {
       payload: { installationId, setupAction, repositoryCount: repositories.length },
     });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "GitHub App installation sync failed.";
+    const message = getCleanErrorMessage(error, "GitHub App installation sync failed.");
 
     // Best-effort audit log — don't let this throw
     await recordIngestionEvent({

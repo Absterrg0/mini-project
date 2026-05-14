@@ -8,8 +8,14 @@ import type {
   WorkflowRun,
 } from "@/app/lib/types";
 import type { Prisma } from "@prisma/client";
-import { GitHubAppConfigurationError, syncConnectedGitHubInstallations } from "./github-app";
+import {
+  GitHubAppConfigurationError,
+  getRepositoryInstallationId,
+  githubInstallationRequest,
+  syncConnectedGitHubInstallations,
+} from "./github-app";
 import { prisma } from "./prisma";
+import { deriveWorkflowRunTelemetrySource, isExecForgeEnrichedRuntime } from "./telemetry-contract";
 
 export interface ExecutionSnapshot {
   organizations: OrganizationProfile[];
@@ -118,13 +124,21 @@ function mapRunRecord(run: {
     changedFiles: Array.isArray(run.changedFiles) ? (run.changedFiles as string[]) : [],
     jobs: Array.isArray(run.jobs) ? (run.jobs as WorkflowRun["jobs"]) : [],
     tests: Array.isArray(run.tests) ? (run.tests as WorkflowRun["tests"]) : [],
-    telemetrySource: run.telemetrySource as WorkflowRun["telemetrySource"],
+    telemetrySource: deriveWorkflowRunTelemetrySource(run.telemetrySource, run.runtimeTelemetry),
     telemetryWrapperVersion: run.telemetryWrapperVersion ?? undefined,
     runtimeTelemetry:
       run.runtimeTelemetry && typeof run.runtimeTelemetry === "object"
         ? (run.runtimeTelemetry as WorkflowRun["runtimeTelemetry"])
         : undefined,
-    aiScanResult: (run as any).aiScanResult?.issues ?? undefined,
+    aiScanResult: (run as { aiScanResult?: { issues?: unknown; scannedCommitSha?: string | null } | null })
+      .aiScanResult?.issues ?? undefined,
+    aiScanScannedCommitSha:
+      (run as { aiScanResult?: { scannedCommitSha?: string | null } | null }).aiScanResult?.scannedCommitSha ?? undefined,
+    runAnalysis: (() => {
+      const ra = (run as { runAnalysis?: { markdown: string; model: string; createdAt: Date } | null }).runAnalysis;
+      if (!ra) return null;
+      return { markdown: ra.markdown, model: ra.model, createdAt: ra.createdAt.toISOString() };
+    })(),
   };
 }
 
@@ -159,7 +173,7 @@ const getCachedSnapshot = unstable_cache(
     });
 
     const workflowRuns = await prisma.workflowRunSnapshot.findMany({
-      include: { aiScanResult: true },
+      include: { aiScanResult: true, runAnalysis: true },
       orderBy: { startedAt: "asc" },
     });
 
@@ -206,7 +220,7 @@ export async function loadExecutionSnapshot(
       },
       orderBy: { name: "asc" },
     });
-    const workflowRuns = await prisma.workflowRunSnapshot.findMany({ include: { aiScanResult: true }, orderBy: { startedAt: "asc" } });
+    const workflowRuns = await prisma.workflowRunSnapshot.findMany({ include: { aiScanResult: true, runAnalysis: true }, orderBy: { startedAt: "asc" } });
     const pipelines = organizations.map((organization) => {
       const checkpoint = organization.ingestionCheckpoints[0];
       if (!checkpoint) return { organizationId: organization.id, syncCursor: "", eventsProcessed24h: 0, webhookDeliveryPct: 0, checks: [] } satisfies IngestionPipeline;
@@ -315,8 +329,77 @@ export interface ExistingPlan {
   branchName: string;
   githubPullRequestNumber: number | null;
   githubPullRequestUrl: string | null;
+  githubPullRequestStatus: "raised" | "merged" | null;
   createdAt: string;
   plan?: OptimizationPullRequestPlan;
+}
+
+function stripNonFunctionalPlanText(content: string, path: string) {
+  const lowerPath = path.toLowerCase();
+  if (/\.(ya?ml)$/.test(lowerPath)) {
+    return content
+      .split("\n")
+      .map((line) => line.replace(/\s+#.*$/, "").trimEnd())
+      .filter((line) => {
+        const trimmed = line.trim();
+        return trimmed && !trimmed.startsWith("#");
+      })
+      .join("\n")
+      .trim();
+  }
+
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((line) => line.replace(/\s+\/\/.*$/, "").trimEnd())
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.startsWith("//");
+    })
+    .join("\n")
+    .trim();
+}
+
+function isUsablePersistedPlan(plan: OptimizationPullRequestPlan) {
+  if (!plan.files.length) return false;
+
+  return plan.files.some((file) => {
+    if (file.operation === "create" && !file.oldContent) {
+      return stripNonFunctionalPlanText(file.content, file.path).length > 0;
+    }
+
+    if (typeof file.oldContent !== "string") {
+      return stripNonFunctionalPlanText(file.content, file.path).length > 0;
+    }
+
+    return stripNonFunctionalPlanText(file.oldContent, file.path) !== stripNonFunctionalPlanText(file.content, file.path);
+  });
+}
+
+async function getPullRequestStatus(params: {
+  repositoryFullName: string;
+  pullRequestNumber: number | null;
+}): Promise<ExistingPlan["githubPullRequestStatus"]> {
+  if (!params.pullRequestNumber) return null;
+
+  try {
+    const installationId = await getRepositoryInstallationId(params.repositoryFullName);
+    if (!installationId) return "raised";
+
+    const [owner, repo] = params.repositoryFullName.split("/");
+    const response = await githubInstallationRequest<{
+      merged_at?: string | null;
+      state?: string;
+    }>(installationId, `/repos/${owner}/${repo}/pulls/${params.pullRequestNumber}`);
+
+    if (!response.ok) return "raised";
+    return response.data?.merged_at ? "merged" : "raised";
+  } catch (error) {
+    if (!(error instanceof GitHubAppConfigurationError)) {
+      console.error("Failed to refresh pull request status", error);
+    }
+    return "raised";
+  }
 }
 
 /** Return all persisted optimization plans for a given run so the UI can mark actions as "done". */
@@ -355,32 +438,41 @@ export async function loadExistingPlans(params: {
 
   // Keep only the most-recent plan per actionId (a user may have re-generated)
   const seen = new Set<string>();
-  return records
+  const latestRecords = records
     .filter((r) => {
       if (seen.has(r.actionId)) return false;
       seen.add(r.actionId);
       return true;
-    })
-    .map((r) => ({
+    });
+
+  return Promise.all(latestRecords.map(async (r) => {
+    const plan = {
+      actionId: r.actionId,
+      repositoryFullName: params.repositoryFullName,
+      branchName: r.branchName,
+      baseBranch: r.baseBranch,
+      title: r.title,
+      body: r.body,
+      risk: r.risk as any,
+      estimatedTimeSavingsPct: r.estimatedTimeSavingsPct,
+      estimatedCostSavingsUsdMonthly: r.estimatedCostSavingsUsdMonthly,
+      files: Array.isArray(r.files) ? (r.files as any) : [],
+      guardrails: Array.isArray(r.guardrails) ? (r.guardrails as any) : [],
+    };
+
+    return {
       actionId: r.actionId,
       branchName: r.branchName,
       githubPullRequestNumber: r.githubPullRequestNumber,
       githubPullRequestUrl: r.githubPullRequestUrl,
-      createdAt: r.createdAt.toISOString(),
-      plan: {
-        actionId: r.actionId,
+      githubPullRequestStatus: await getPullRequestStatus({
         repositoryFullName: params.repositoryFullName,
-        branchName: r.branchName,
-        baseBranch: r.baseBranch,
-        title: r.title,
-        body: r.body,
-        risk: r.risk as any,
-        estimatedTimeSavingsPct: r.estimatedTimeSavingsPct,
-        estimatedCostSavingsUsdMonthly: r.estimatedCostSavingsUsdMonthly,
-        files: Array.isArray(r.files) ? (r.files as any) : [],
-        guardrails: Array.isArray(r.guardrails) ? (r.guardrails as any) : [],
-      },
-    }));
+        pullRequestNumber: r.githubPullRequestNumber,
+      }),
+      createdAt: r.createdAt.toISOString(),
+      plan: isUsablePersistedPlan(plan) ? plan : undefined,
+    };
+  }));
 }
 
 
@@ -518,13 +610,17 @@ export async function ingestWorkflowRun(params: {
 
   const existing = await prisma.workflowRunSnapshot.findUnique({
     where: { externalRunId },
-    select: { telemetrySource: true },
+    select: { telemetrySource: true, runtimeTelemetry: true },
   });
 
   // Never let the webhook overwrite enriched telemetry that was already posted
   // by the SDK. The SDK runs DURING the job, the webhook fires AFTER — if we
   // blindly set telemetrySource back to "github" we lose the enrichment.
-  const alreadyEnriched = existing?.telemetrySource === "execforge-wrapper";
+  // Also treat persisted runtime JSON as enriched so a merge race cannot wipe
+  // samples when the column briefly disagrees with the payload.
+  const alreadyEnriched =
+    existing?.telemetrySource === "execforge-wrapper" ||
+    isExecForgeEnrichedRuntime(existing?.runtimeTelemetry);
 
   await prisma.workflowRunSnapshot.upsert({
     where: { externalRunId },

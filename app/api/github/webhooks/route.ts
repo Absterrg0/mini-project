@@ -11,6 +11,7 @@ import {
   verifyGitHubWebhookSignature,
   workflowRunFromGitHub,
 } from "@/lib/github-app";
+import { getCleanErrorMessage } from "@/lib/api-errors";
 
 function deliveryId(request: Request): string {
   return request.headers.get("x-github-delivery") ?? randomUUID();
@@ -186,8 +187,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: error.message }, { status: 503 });
     }
 
+    const detail = getCleanErrorMessage(error, "Webhook processing failed.");
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Webhook processing failed." },
+      { error: detail },
       { status: 502 },
     );
   }

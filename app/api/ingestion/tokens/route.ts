@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { getCleanErrorMessage } from "@/lib/api-errors";
 import { createIngestionToken, listIngestionTokens } from "@/lib/ingestion-tokens";
 
 interface CreateTokenBody {
@@ -53,8 +54,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
+    const detail = getCleanErrorMessage(error, "Unable to create token.");
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unable to create token." },
+      { error: detail },
       { status: 400 },
     );
   }

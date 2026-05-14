@@ -4,6 +4,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RefreshControls } from "@/components/dashboard/refresh-controls";
+import { TestsEmptyState } from "@/components/dashboard/tests-empty-state";
 import {
   AlertTriangle,
   CheckCircle,
@@ -81,8 +82,18 @@ function aggregateTests(signals: TestSignal[]): Array<{
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
-export default async function TestsPage() {
-  const { workflowRuns } = await loadExecutionSnapshot();
+export default async function TestsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ repo?: string }>;
+}) {
+  const { repo: repoId } = await searchParams;
+  const snapshot = await loadExecutionSnapshot();
+  const { workflowRuns, organizations } = snapshot;
+
+  // Resolve the active repository for the scaffold CTA
+  const allRepos = organizations.flatMap((o) => o.repositories);
+  const activeRepo = repoId ? (allRepos.find((r) => r.id === repoId) ?? allRepos[0]) : allRepos[0];
 
   const flakyTests = detectFlakyTests(workflowRuns);
   const allSignals = workflowRuns.flatMap((r) => r.tests);
@@ -127,16 +138,7 @@ export default async function TestsPage() {
       </header>
 
       {uniqueTestCount === 0 ? (
-        <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3 p-8 text-center">
-          <div className="size-12 rounded-full border border-border bg-card flex items-center justify-center mb-2">
-            <FlaskConical size={20} strokeWidth={1.5} className="text-muted-foreground" />
-          </div>
-          <p className="font-medium">No test data yet</p>
-          <p className="text-sm text-muted-foreground max-w-sm">
-            Ingest workflow runs that include test signals to see flake detection,
-            retry analysis, and duration tracking here.
-          </p>
-        </div>
+        <TestsEmptyState repositoryFullName={activeRepo?.fullName} />
       ) : (
         <div className="p-6 space-y-5">
 
@@ -326,7 +328,6 @@ export default async function TestsPage() {
                           {t.retriesPerFailure.toFixed(1)}×
                         </td>
                         <td className="mono text-muted-foreground">
-                          {/* look up avg duration from aggregated */}
                           {(() => {
                             const agg = aggregated.find(
                               (a) => a.name === t.name && a.file === t.file

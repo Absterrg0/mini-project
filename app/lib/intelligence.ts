@@ -7,6 +7,7 @@ import type {
   StepExecution,
   WorkflowRun,
 } from "./types";
+import { deriveOptimizations } from "./analysis";
 
 export interface CriticalPathResult {
   path: string[];
@@ -301,78 +302,7 @@ export function detectFlakyTests(runs: WorkflowRun[]): FlakyTestInsight[] {
 }
 
 export function suggestOptimizations(run: WorkflowRun): OptimizationAction[] {
-  const actions: OptimizationAction[] = [];
-
-  if (run.telemetrySource !== "execforge-wrapper") {
-    actions.push({
-      id: "install-telemetry-wrapper",
-      title: "Install ExecForge runtime action",
-      rationale:
-        "GitHub timing data explains workflow status, but not process-level CPU, memory, artifact, and runner pressure. The wrapper adds pre/post capture around existing jobs without requiring workflows to be rebuilt on this platform.",
-      estimatedTimeSavingsPct: 0,
-      estimatedCostSavingsUsdMonthly: 0,
-      risk: "low",
-      filesToChange: [
-        ".github/workflows/execforge-runtime-example.yml",
-        ".github/execforge/README.md",
-      ],
-    });
-  }
-
-  const buildJob = run.jobs.find((job) => job.id === "build");
-  if (buildJob && buildJob.cacheHitRate < 0.5) {
-    actions.push({
-      id: "split-docker-stages",
-      title: "Split Dockerfile stages for dependency and app layers",
-      rationale:
-        "Build layers are frequently invalidated by app-level changes. Separating dependency and generation stages preserves reusable layers.",
-      estimatedTimeSavingsPct: 31,
-      estimatedCostSavingsUsdMonthly: 840,
-      risk: "low",
-      filesToChange: ["Dockerfile", ".github/workflows/ci.yml"],
-    });
-  }
-
-  const e2eJob = run.jobs.find((job) => job.id === "e2e");
-  if (e2eJob) {
-    actions.push({
-      id: "e2e-matrix",
-      title: "Shard E2E suite across matrix workers",
-      rationale:
-        "The E2E stage is the longest parallel branch and currently serial. Matrix sharding reduces wall-clock critical path.",
-      estimatedTimeSavingsPct: 27,
-      estimatedCostSavingsUsdMonthly: 510,
-      risk: "medium",
-      filesToChange: [".github/workflows/e2e.yml", "playwright.config.ts"],
-    });
-  }
-
-  const testJob = run.jobs.find((job) => job.id === "test");
-  if (testJob && testJob.status === "flaky") {
-    actions.push({
-      id: "flaky-quarantine",
-      title: "Auto-quarantine top flaky tests and open stabilization issues",
-      rationale:
-        "Retries are masking deterministic signal and inflating queue pressure. Quarantining unstable tests restores trust in green builds.",
-      estimatedTimeSavingsPct: 12,
-      estimatedCostSavingsUsdMonthly: 190,
-      risk: "medium",
-      filesToChange: ["jest.config.ts", "tests/flaky.allowlist.json"],
-    });
-  }
-
-  actions.push({
-    id: "remote-cache",
-    title: "Enable remote cache hydration for install and build tasks",
-    rationale:
-      "Current run shows broad cache miss patterns across lint, test, and build. Remote cache improves cross-run and cross-branch reuse.",
-    estimatedTimeSavingsPct: 18,
-    estimatedCostSavingsUsdMonthly: 320,
-    risk: "low",
-    filesToChange: ["turbo.json", ".github/workflows/ci.yml"],
-  });
-
-  return actions;
+  return deriveOptimizations(run, [run]);
 }
 
 export function estimateSimulation(

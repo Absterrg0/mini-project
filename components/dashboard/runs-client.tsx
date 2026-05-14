@@ -33,6 +33,11 @@ export function RunsClient({
     ? Math.round(sorted.reduce((s, r) => s + r.totalDurationSec, 0) / totalRuns)
     : 0;
 
+  const repositoryById =
+    data.organizations[0]?.repositories?.length ?
+      Object.fromEntries(data.organizations[0].repositories.map((r) => [r.id, r.fullName]))
+    : undefined;
+
   return (
     <div className="p-6 space-y-4">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 fade-up-1">
@@ -56,8 +61,10 @@ export function RunsClient({
           <CardTitle className="text-sm font-medium">All Workflow Runs</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          <RunsAccordion
+        <RunsAccordion
             runs={sorted}
+            repoFullName={repoFullName}
+            repositoryById={repositoryById}
             emptyMessage={`No runs found for ${repoFullName ?? "this repository"}.`}
           />
         </CardContent>

@@ -74,16 +74,29 @@ model WorkflowRunSnapshot {
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt
   aiScanResult       AiScanResult?
+  runAnalysis        RunAnalysis?
 
   @@index([repositoryId, startedAt])
 }
 
 model AiScanResult {
-  id              String                @id @default(cuid())
-  runExternalId   String                @unique
-  run             WorkflowRunSnapshot   @relation(fields: [runExternalId], references: [externalRunId], onDelete: Cascade)
-  issues          Json
-  createdAt       DateTime              @default(now())
+  id                String                @id @default(cuid())
+  runExternalId     String                @unique
+  run               WorkflowRunSnapshot   @relation(fields: [runExternalId], references: [externalRunId], onDelete: Cascade)
+  issues            Json
+  /** Workflow commit at the time issues were last written; mismatch vs snapshot.commitSha means cached issues may be stale. */
+  scannedCommitSha  String?
+  createdAt         DateTime              @default(now())
+}
+
+model RunAnalysis {
+  id            String              @id @default(cuid())
+  runExternalId String              @unique
+  run           WorkflowRunSnapshot @relation(fields: [runExternalId], references: [externalRunId], onDelete: Cascade)
+  markdown      String
+  model         String
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
 }
 
 

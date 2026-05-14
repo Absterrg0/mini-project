@@ -17,8 +17,11 @@ export const queryKeys = {
   prPlan: (actionId: string, runId: string) =>
     ["pr-plan", actionId, runId] as const,
 
-  /** Persisted OptimizationPlanRecords for a given repo + run */
-  existingPlans: (repositoryFullName: string, runId: string) =>
-    ["existing-plans", repositoryFullName, runId] as const,
+  /** Persisted OptimizationPlanRecords for a given repo + run (optional prior run for carry-forward merge) */
+  existingPlans: (repositoryFullName: string, runId: string, carryForwardSourceRunId?: string | null) =>
+    ["existing-plans", repositoryFullName, runId, carryForwardSourceRunId ?? ""] as const,
+
+  /** Persisted AI narrative analysis for a single run */
+  runAnalysis: (runId: string) => ["run-analysis", runId] as const,
 } as const;
 

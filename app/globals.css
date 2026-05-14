@@ -29,7 +29,7 @@
   --secondary:         #1e1e1e;
   --secondary-foreground: #e4e4e7;
   --muted:             #1a1a1a;
-  --muted-foreground:  #71717a;
+  --muted-foreground:  #82828b;
   --accent:            #1e1e1e;
   --accent-foreground: #e4e4e7;
   --destructive:       #ef4444;
@@ -216,6 +216,30 @@ body {
   flex-shrink: 0;
 }
 
+/* Live polling: brief success cue (skipped when reduced motion is requested) */
+@keyframes dash-live-refetch-flash {
+  0% {
+    opacity: 1;
+    border-color: color-mix(in oklab, var(--border) 70%, transparent);
+  }
+  40% {
+    opacity: 0.82;
+    border-color: color-mix(in oklab, #4ade80 55%, var(--border));
+  }
+  100% {
+    opacity: 1;
+    border-color: color-mix(in oklab, var(--border) 70%, transparent);
+  }
+}
+.dash-live-refetch-flash {
+  animation: dash-live-refetch-flash 300ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dash-live-refetch-flash {
+    animation: none;
+  }
+}
+
 /* ─── Onboarding shell ───────────────────────────────── */
 .onboard-shell {
   min-height: 100vh;
@@ -288,6 +312,11 @@ body {
 .fade-up-3 { animation: fade-up 280ms 120ms ease both; }
 .fade-up-4 { animation: fade-up 280ms 160ms ease both; }
 
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
 /* ─── Misc ───────────────────────────────────────────── */
 .divider { height: 1px; background: var(--border); }
 
@@ -318,3 +347,46 @@ body {
   border-radius: 999px;
 }
 .scroll-thin::-webkit-scrollbar-thumb:hover { background: #444; }
+
+/* ─── Sonner toasts (compact, readable on dark + richColors) ─── */
+[data-sonner-toaster] {
+  --width: min(calc(100vw - 2rem), 17.5rem);
+}
+
+[data-sonner-toast][data-styled="true"] {
+  padding: 10px 12px !important;
+  align-items: flex-start !important;
+  gap: 10px !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38) !important;
+}
+
+[data-sonner-toast][data-styled="true"] [data-content] {
+  gap: 3px;
+  min-width: 0;
+}
+
+[data-sonner-toast][data-styled="true"] [data-title] {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+[data-sonner-toast][data-styled="true"] [data-description] {
+  font-size: 0.75rem;
+  line-height: 1.45;
+  font-weight: 400;
+}
+
+[data-rich-colors="true"][data-sonner-toast][data-type="success"] [data-description] {
+  color: rgb(209 250 229 / 0.94) !important;
+}
+
+[data-rich-colors="true"][data-sonner-toast][data-type="info"] [data-description],
+[data-rich-colors="true"][data-sonner-toast][data-type="warning"] [data-description],
+[data-rich-colors="true"][data-sonner-toast][data-type="error"] [data-description] {
+  opacity: 0.94;
+}
+
+[data-sonner-toast][data-styled="true"] [data-icon] {
+  margin-top: 2px;
+}

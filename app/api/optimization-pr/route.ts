@@ -1,11 +1,15 @@
 import { headers } from "next/headers";
+import { revalidateTag } from "next/cache";
 import { NextResponse } from "next/server";
 import { buildOptimizationPullRequestPlan } from "@/app/lib/pr-agent";
 import { deriveOptimizations } from "@/app/lib/analysis";
 import { loadExecutionSnapshot, loadOptimizationContext, recordOptimizationPlan, loadExistingPlans } from "@/lib/execution-store";
+import { resolveEffectiveAiScanIssues } from "@/lib/ai-scan-carry-forward";
 import { auth } from "@/lib/auth";
 import { COOKIE_NAME, type AISettings, buildAIModel } from "@/lib/ai-provider";
 import { generateText } from "ai";
+import { parseJsonWithRepair } from "@/lib/json-model-parse";
+import { getCleanErrorMessage } from "@/lib/api-errors";
 import { getRepositoryInstallationId, githubInstallationRequest } from "@/lib/github-app";
 import type { OptimizationPullRequestPlan, OptimizationAction } from "@/app/lib/types";
 
@@ -125,6 +129,120 @@ function getAISettings(cookieHeader: string): AISettings | null {
   }
 }
 
+function stripNonFunctionalText(content: string, path: string) {
+  const lowerPath = path.toLowerCase();
+  if (/\.(ya?ml)$/.test(lowerPath)) {
+    return content
+      .split("\n")
+      .map((line) => line.replace(/\s+#.*$/, "").trimEnd())
+      .filter((line) => {
+        const trimmed = line.trim();
+        return trimmed && !trimmed.startsWith("#");
+      })
+      .join("\n")
+      .trim();
+  }
+
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((line) => line.replace(/\s+\/\/.*$/, "").trimEnd())
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.startsWith("//");
+    })
+    .join("\n")
+    .trim();
+}
+
+function hasOnlyCommentOrWhitespaceChanges(file: {
+  path: string;
+  operation?: string;
+  content?: string;
+  oldContent?: string;
+}) {
+  if (file.operation === "create" && !file.oldContent) {
+    return stripNonFunctionalText(file.content ?? "", file.path).length === 0;
+  }
+
+  if (typeof file.oldContent !== "string") {
+    return false;
+  }
+
+  return stripNonFunctionalText(file.oldContent, file.path) === stripNonFunctionalText(file.content ?? "", file.path);
+}
+
+function containsOptimizationImplementation(file: {
+  path: string;
+  content?: string;
+  oldContent?: string;
+}) {
+  const lowerPath = file.path.toLowerCase();
+  const content = file.content ?? "";
+  const oldContent = file.oldContent ?? "";
+
+  if (hasOnlyCommentOrWhitespaceChanges(file)) return false;
+
+  if (lowerPath.includes(".github/workflows/") && /\.(ya?ml)$/.test(lowerPath)) {
+    const workflowPatterns = [
+      /actions\/cache@v\d+/,
+      /cache-(from|to):/,
+      /docker\/build-push-action@v\d+/,
+      /strategy:\s*\n[\s\S]*matrix:/,
+      /concurrency:\s*\n[\s\S]*cancel-in-progress:\s*true/,
+      /timeout-minutes:/,
+      /if:\s*(failure|always)\(\)/,
+      /retention-days:/,
+      /Absterrg0\/execforge-runtime\/(start|finish)@v\d+/,
+      /runs-on:\s*(?!ubuntu-latest\b)[^\n]+/,
+    ];
+    return workflowPatterns.some((pattern) => pattern.test(content) && !pattern.test(oldContent));
+  }
+
+  if (lowerPath.endsWith("dockerfile")) {
+    return /FROM\s+\S+\s+AS\s+\w+/i.test(content) && /COPY\s+--from=/i.test(content);
+  }
+
+  if (/(\.test\.|\.spec\.|__tests__|tests?\/)/i.test(lowerPath)) {
+    return /(describe|it|test)\s*\(/.test(content) && /(expect|assert)\s*\(/.test(content);
+  }
+
+  if (lowerPath.endsWith("turbo.json") || lowerPath.endsWith("package.json")) {
+    return stripNonFunctionalText(content, lowerPath) !== stripNonFunctionalText(oldContent, lowerPath);
+  }
+
+  return stripNonFunctionalText(content, lowerPath) !== stripNonFunctionalText(oldContent, lowerPath);
+}
+
+function validateGeneratedPlanFiles(files: Array<{
+  path: string;
+  operation?: string;
+  content?: string;
+  oldContent?: string;
+}>) {
+  if (!files.length) {
+    throw new Error("AI returned no file changes.");
+  }
+
+  const invalidFiles = files.filter((file) => hasOnlyCommentOrWhitespaceChanges(file));
+  if (invalidFiles.length === files.length) {
+    throw new Error("AI returned only comments or whitespace. Regenerate with a real configuration change.");
+  }
+
+  const implementedFiles = files.filter(containsOptimizationImplementation);
+  if (!implementedFiles.length) {
+    // Fall back: accept if any file has meaningful non-comment content differences
+    const anyMeaningfulChange = files.some((file) => {
+      const oldStripped = stripNonFunctionalText(file.oldContent ?? "", file.path);
+      const newStripped = stripNonFunctionalText(file.content ?? "", file.path);
+      return newStripped.length > 0 && oldStripped !== newStripped;
+    });
+    if (!anyMeaningfulChange) {
+      throw new Error("AI did not implement a concrete optimization. It must change workflow behavior, cache settings, tests, runner configuration, or build configuration.");
+    }
+  }
+}
+
 export async function POST(request: Request) {
   const session = await auth.api.getSession({
     headers: await headers(),
@@ -152,16 +270,21 @@ export async function POST(request: Request) {
   // Load all runs for this repo to give deriveOptimizations full context
   const { workflowRuns } = await loadExecutionSnapshot();
   const allRepoRuns = workflowRuns.filter((r) => r.repositoryId === repository.id);
+  const { issues: effectiveAiIssues } = resolveEffectiveAiScanIssues(run);
 
+  /** Rule-based actions from `deriveOptimizations` must never use the AI plan path, even if `isAiGenerated` were ever set incorrectly on the object. */
+  let actionOrigin: "rule" | "ai" = "rule";
   let action: OptimizationAction | undefined = deriveOptimizations(run, allRepoRuns).find((item) => item.id === body.actionId);
 
-  if (!action && Array.isArray(run.aiScanResult)) {
-    const aiIssue = run.aiScanResult.find((issue: any) => issue.action?.id === body.actionId);
-    if (aiIssue && aiIssue.action) {
-      action = {
-        ...aiIssue.action,
-        isAiGenerated: true,
-      } as OptimizationAction;
+  if (!action && Array.isArray(effectiveAiIssues)) {
+    const aiIssue = effectiveAiIssues.find((issue: unknown) => {
+      const rec = issue as { action?: { id?: string } };
+      return rec.action?.id === body.actionId;
+    });
+    if (aiIssue && typeof aiIssue === "object" && "action" in aiIssue) {
+      const act = (aiIssue as { action: OptimizationAction }).action;
+      action = { ...act, isAiGenerated: true } as OptimizationAction;
+      actionOrigin = "ai";
     }
   }
 
@@ -179,7 +302,7 @@ export async function POST(request: Request) {
       : f
   );
 
-  let plan: OptimizationPullRequestPlan;
+  let plan: OptimizationPullRequestPlan | undefined;
   const installationId = await getRepositoryInstallationId(repository.fullName);
   const liveCreationEnabled = Boolean(installationId);
 
@@ -189,9 +312,31 @@ export async function POST(request: Request) {
   });
   const existingPlanRecord = existingPlans.find((p) => p.actionId === body.actionId);
 
+  let reusedExistingPlan = false;
+
   if (existingPlanRecord?.plan && !body.userFeedback) {
-    plan = existingPlanRecord.plan;
-  } else if (action.isAiGenerated) {
+    plan = {
+      ...existingPlanRecord.plan,
+      estimatedTimeSavingsPct: Math.max(
+        existingPlanRecord.plan.estimatedTimeSavingsPct,
+        action.estimatedTimeSavingsPct,
+      ),
+      estimatedCostSavingsUsdMonthly: Math.max(
+        existingPlanRecord.plan.estimatedCostSavingsUsdMonthly,
+        action.estimatedCostSavingsUsdMonthly,
+      ),
+    };
+    try {
+      validateGeneratedPlanFiles(plan.files);
+      reusedExistingPlan = true;
+    } catch {
+      plan = undefined;
+    }
+  }
+
+  if (!plan) {
+  // Deterministic pr-agent path unless the action came only from persisted AI scan issues.
+  if (actionOrigin === "ai") {
     // 1. Fetch old content for the files if possible
     const oldFiles: Record<string, string> = {};
     if (installationId) {
@@ -241,7 +386,11 @@ export async function POST(request: Request) {
 ${content}
 `).join("\n");
 
-    const prompt = `You are ExecForge PR Agent. You must implement the following optimization action.
+    const prompt = `You are ExecForge PR Agent. You are opening a production pull request, not writing advice.
+
+Your output must contain concrete implementation changes that alter CI/build/test behavior. A PR that only adds comments, documentation, TODOs, notes, explanatory text, empty config, or unchanged files is a failed answer.
+
+Optimization action:
 Title: ${action.title}
 Rationale: ${action.rationale}
 Files to change: ${action.filesToChange.join(", ")}
@@ -251,7 +400,18 @@ Repository: ${repository.fullName}
 Workflow Name: ${run.workflowName}
 Branch: ${run.branch}
 
-${fileContext ? `Existing file contents:\n${fileContext}` : `No existing file contents available. Please synthesize the required files.`}
+${fileContext ? `Existing file contents:\n${fileContext}` : `No existing file contents available. Synthesize complete, valid files with functional configuration.`}
+
+Implementation requirements:
+- Modify executable workflow/config/test code, not comments.
+- Do not add an "Optimization Note", TODO, advisory comment block, README-style explanation, or any comment-only change.
+- Preserve the existing workflow triggers, job names, required commands, secrets, and environment variables unless the optimization requires a direct change.
+- For GitHub Actions YAML, implement real keys such as actions/cache@v4, docker/build-push-action cache-from/cache-to, strategy.matrix, concurrency.cancel-in-progress, timeout-minutes, upload-artifact retention/path changes, runs-on changes, or ExecForge start/finish actions.
+- For runner-size recommendations, change \`runs-on\` to a concrete better runner label only when one is clearly available from context; otherwise change timeout/concurrency/cache/artifact behavior that actually reduces waste. Never just add a note saying the current runner is fine.
+- For test-generation recommendations, create real test files with executable assertions.
+- For Docker recommendations, change Dockerfile stages and/or BuildKit cache settings.
+- Every returned file must be complete file content, parseable by its tool, and meaningfully different from the old content after comments are removed.
+- If you cannot make a useful implementation for a suggested file, omit that file and implement the optimization in a different listed file.
 
 CRITICAL: When generating file paths, DO NOT use uppercase for workflow file names (e.g. use .github/workflows/ci.yml, NOT .github/workflows/CI.yml). Always use lowercase for workflow files.
 
@@ -277,7 +437,9 @@ Return ONLY valid JSON in this format:
     try {
       const { text } = await generateText({
         model,
-        system: "You are an expert CI/CD engineer. Output strictly valid JSON without markdown fences.",
+        system:
+          "You are an expert CI/CD engineer who ships concrete CI/build/test changes. Never return comment-only, documentation-only, TODO-only, or unchanged-file diffs. Output strictly valid JSON without markdown fences. " +
+          "CRITICAL: inside JSON string values (especially `content`), every newline must be written as \\n, tabs as \\t, carriage returns as \\r, and double quotes as \\\". Never put raw line breaks inside a quoted string.",
         prompt,
         temperature: 0.1,
       });
@@ -288,10 +450,42 @@ Return ONLY valid JSON in this format:
         .replace(/```\s*$/i, "")
         .trim();
 
-      const parsed = JSON.parse(cleaned) as { files: any[] };
+      const parsed = parseJsonWithRepair(cleaned) as { files?: unknown };
+      if (!Array.isArray(parsed.files)) {
+        throw new Error("AI returned malformed JSON: missing or invalid `files` array.");
+      }
       const safeRunId = run.id.replace(/[^a-zA-Z0-9._-]/g, "-");
       const branchName = `exec-intel/${action.id.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 44)}-${safeRunId}`;
       
+      const planFiles = parsed.files.map(f => {
+        let matchedPath = Object.keys(oldFiles).find(p => p.toLowerCase() === f.path.toLowerCase()) 
+                       || Object.keys(oldFiles).find(p => p.toLowerCase().endsWith(f.path.toLowerCase()));
+        
+        if (!matchedPath) {
+          matchedPath = run.changedFiles.find(p => p.toLowerCase() === f.path.toLowerCase()) 
+                     || run.changedFiles.find(p => p.toLowerCase().endsWith(f.path.toLowerCase()));
+        }
+        
+        matchedPath = matchedPath || f.path;
+        // TypeScript: narrow to string so .toLowerCase() is always valid
+        const resolvedPath: string = matchedPath ?? f.path;
+        const normalizedPath =
+          resolvedPath.toLowerCase() === ".github/workflows/ci.yml"
+            ? ".github/workflows/ci.yml"
+            : resolvedPath;
+        
+        const oldContent = oldFiles[normalizedPath];
+        
+        return {
+          ...f,
+          path: normalizedPath,
+          operation: oldContent ? "update" : f.operation,
+          oldContent,
+        };
+      });
+
+      validateGeneratedPlanFiles(planFiles);
+
       plan = {
         actionId: action.id,
         repositoryFullName: repository.fullName,
@@ -302,32 +496,7 @@ Return ONLY valid JSON in this format:
         risk: action.risk,
         estimatedTimeSavingsPct: action.estimatedTimeSavingsPct,
         estimatedCostSavingsUsdMonthly: action.estimatedCostSavingsUsdMonthly,
-        files: parsed.files.map(f => {
-          let matchedPath = Object.keys(oldFiles).find(p => p.toLowerCase() === f.path.toLowerCase()) 
-                         || Object.keys(oldFiles).find(p => p.toLowerCase().endsWith(f.path.toLowerCase()));
-          
-          if (!matchedPath) {
-            matchedPath = run.changedFiles.find(p => p.toLowerCase() === f.path.toLowerCase()) 
-                       || run.changedFiles.find(p => p.toLowerCase().endsWith(f.path.toLowerCase()));
-          }
-          
-          matchedPath = matchedPath || f.path;
-          // TypeScript: narrow to string so .toLowerCase() is always valid
-          const resolvedPath: string = matchedPath ?? f.path;
-          const normalizedPath =
-            resolvedPath.toLowerCase() === ".github/workflows/ci.yml"
-              ? ".github/workflows/ci.yml"
-              : resolvedPath;
-          
-          const oldContent = oldFiles[normalizedPath];
-          
-          return {
-            ...f,
-            path: normalizedPath,
-            operation: oldContent ? "update" : f.operation,
-            oldContent,
-          };
-        }),
+        files: planFiles,
         guardrails: [
           "Generated from observed workflow telemetry.",
           "Human review is required before merge.",
@@ -335,7 +504,8 @@ Return ONLY valid JSON in this format:
       };
     } catch (error) {
       console.error("Failed to parse AI generated PR plan", error);
-      return NextResponse.json({ error: "AI failed to generate a valid PR plan." }, { status: 500 });
+      const detail = getCleanErrorMessage(error, "Unknown validation failure.");
+      return NextResponse.json({ error: `AI failed to generate a useful PR plan: ${detail}` }, { status: 500 });
     }
   } else {
     plan = buildOptimizationPullRequestPlan({ action, repository, run });
@@ -343,13 +513,14 @@ Return ONLY valid JSON in this format:
     // Fetch old content for proper diffs in the UI if possible
     if (installationId) {
       const [owner, repoName] = repository.fullName.split("/");
+      const baseBranch = plan.baseBranch;
       await Promise.all(
         plan.files.map(async (file) => {
           if (file.operation === "update") {
             const encodedPath = file.path.split("/").map(encodeURIComponent).join("/");
             const existing = await githubRepoFetch<{ content?: string }>(
               installationId,
-              `/repos/${owner}/${repoName}/contents/${encodedPath}?ref=${encodeURIComponent(plan.baseBranch)}`
+              `/repos/${owner}/${repoName}/contents/${encodedPath}?ref=${encodeURIComponent(baseBranch)}`
             );
             if (existing.ok && existing.data?.content) {
               file.oldContent = Buffer.from(existing.data.content, "base64").toString("utf8");
@@ -359,18 +530,24 @@ Return ONLY valid JSON in this format:
       );
     }
   }
+  }
+
+  if (!plan) {
+    return NextResponse.json({ error: "Failed to generate an optimization plan." }, { status: 500 });
+  }
 
   // Live creation logic follows...
 
   if (body.mode !== "create" || !liveCreationEnabled || action.risk === "high") {
-    void recordOptimizationPlan({
-      repositoryFullName: repository.fullName,
-      runId: run.id,
-      plan,
-      liveCreationEnabled,
-    }).catch((error) => {
-      console.error("Failed to persist draft optimization plan", error);
-    });
+    if (!reusedExistingPlan) {
+      await recordOptimizationPlan({
+        repositoryFullName: repository.fullName,
+        runId: run.id,
+        plan,
+        liveCreationEnabled,
+      });
+      revalidateTag("execution-snapshot", "max");
+    }
 
     return NextResponse.json({
       mode: "draft",
@@ -387,15 +564,14 @@ Return ONLY valid JSON in this format:
       throw new Error("GitHub App installation is required for live PR creation.");
     }
     const pullRequest = await createGitHubPullRequest(installationId, plan);
-    void recordOptimizationPlan({
+    await recordOptimizationPlan({
       repositoryFullName: repository.fullName,
       runId: run.id,
       plan,
       liveCreationEnabled,
       pullRequest,
-    }).catch((error) => {
-      console.error("Failed to persist created optimization plan", error);
     });
+    revalidateTag("execution-snapshot", "max");
 
     return NextResponse.json({
       mode: "created",
@@ -403,9 +579,10 @@ Return ONLY valid JSON in this format:
       pullRequest,
     });
   } catch (error) {
+    const detail = getCleanErrorMessage(error, "Failed to create pull request.");
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "Failed to create pull request.",
+        error: detail,
         mode: "draft",
         plan,
       },
