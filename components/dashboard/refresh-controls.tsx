@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { RefreshCw, Radio } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 import { queryKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/button";
 
@@ -12,6 +13,7 @@ const POLL_INTERVAL_SEC = POLL_INTERVAL_MS / 1000;
 
 export function RefreshControls() {
   const qc = useQueryClient();
+  const router = useRouter();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLive, setIsLive] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(POLL_INTERVAL_SEC);
@@ -40,23 +42,25 @@ export function RefreshControls() {
     setIsRefreshing(true);
     try {
       await qc.invalidateQueries({ queryKey: queryKeys.snapshot() });
+      router.refresh();
       triggerLiveRefetchFlash();
     } catch {
       /* no flash on failure */
     } finally {
       setTimeout(() => setIsRefreshing(false), 700);
     }
-  }, [qc, triggerLiveRefetchFlash]);
+  }, [qc, router, triggerLiveRefetchFlash]);
 
   const doManualRefresh = useCallback(async () => {
     setIsRefreshing(true);
     try {
       await qc.invalidateQueries({ queryKey: queryKeys.snapshot() });
+      router.refresh();
       toast.success("Dashboard updated", { duration: 2200 });
     } finally {
       setTimeout(() => setIsRefreshing(false), 700);
     }
-  }, [qc]);
+  }, [qc, router]);
 
   useEffect(() => {
     if (!isLive) return;
