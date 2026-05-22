@@ -4,13 +4,12 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RefreshControls } from "@/components/dashboard/refresh-controls";
-import { TestsEmptyState } from "@/components/dashboard/tests-empty-state";
+
 import { TestScaffoldLauncher } from "@/components/dashboard/test-scaffold-launcher";
 import {
   AlertTriangle,
   Activity,
   FileText,
-  GitBranch,
   ShieldAlert,
   TrendingUp,
   Zap,
@@ -232,14 +231,8 @@ export default async function TestsPage({
         <RefreshControls />
       </header>
 
-      {uniqueTestCount === 0 ? (
-        <div className="p-6 space-y-5">
-          <TestScaffoldLauncher repositoryFullName={activeRepo?.fullName} existingTestCount={0} />
-          <TestsEmptyState repositoryFullName={activeRepo?.fullName} />
-        </div>
-      ) : (
-        <div className="p-6 space-y-5">
-          <TestScaffoldLauncher repositoryFullName={activeRepo?.fullName} existingTestCount={uniqueTestCount} />
+      <div className="p-6 space-y-5">
+        <TestScaffoldLauncher repositoryFullName={activeRepo?.fullName} existingTestCount={uniqueTestCount} />
 
           <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_0.8fr]">
             <Card className="bg-card border-border overflow-hidden">
@@ -291,15 +284,7 @@ export default async function TestsPage({
                     </p>
                   </div>
                 </div>
-                <div className="flex gap-3 rounded-lg border border-border bg-background p-3">
-                  <GitBranch size={15} className="mt-0.5 shrink-0 text-[#a5b4fc]" />
-                  <div>
-                    <p className="text-sm font-medium">Template PRs stay available above</p>
-                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                      They now run with repo context that includes your existing tests, so new PRs should extend rather than duplicate obvious coverage.
-                    </p>
-                  </div>
-                </div>
+
               </CardContent>
             </Card>
           </section>
@@ -415,7 +400,6 @@ export default async function TestsPage({
           </Card>
 
         </div>
-      )}
     </div>
   );
 }
