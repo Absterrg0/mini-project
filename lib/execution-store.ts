@@ -741,7 +741,7 @@ export async function ingestWorkflowRun(params: {
 
   const existing = await prisma.workflowRunSnapshot.findUnique({
     where: { externalRunId },
-    select: { telemetrySource: true, runtimeTelemetry: true },
+    select: { telemetrySource: true, runtimeTelemetry: true, tests: true },
   });
 
   // Never let the webhook overwrite enriched telemetry that was already posted
@@ -752,6 +752,16 @@ export async function ingestWorkflowRun(params: {
   const alreadyEnriched =
     existing?.telemetrySource === "execforge-wrapper" ||
     isExecForgeEnrichedRuntime(existing?.runtimeTelemetry);
+
+  // Preserve SDK-uploaded tests: if the DB already has tests from the SDK,
+  // don't overwrite them with the webhook's empty array.
+  const existingTests = Array.isArray(existing?.tests) ? existing.tests as unknown[] : [];
+  const incomingTests = params.run.tests;
+  const mergedTests = incomingTests.length > 0
+    ? incomingTests
+    : existingTests.length > 0
+    ? existingTests
+    : incomingTests;
 
   await prisma.workflowRunSnapshot.upsert({
     where: { externalRunId },
@@ -766,7 +776,7 @@ export async function ingestWorkflowRun(params: {
       containerLayerReuse: params.run.containerLayerReuse,
       changedFiles: toJson(params.run.changedFiles),
       jobs: toJson(params.run.jobs),
-      tests: toJson(params.run.tests),
+      tests: toJson(mergedTests),
       // Only update telemetry fields if they haven't been enriched yet
       ...(alreadyEnriched
         ? {}
