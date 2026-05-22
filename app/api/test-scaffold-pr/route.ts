@@ -241,7 +241,7 @@ function buildPackageJsonTestSetupFile(context: RepositoryContext): GeneratedFil
     ...context.packageJson,
     scripts: {
       ...(context.packageJson.scripts ?? {}),
-      test: "node --test",
+      test: "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=junit-results.xml",
     },
   };
 
@@ -604,7 +604,8 @@ async function generateRepoAwareFiles(params: {
 - Source-text tests must be resilient. Never use exact JSX/HTML substrings such as fileContent.includes("<body>{children}</body>") or exact className strings. Use regexes that tolerate whitespace, JSX attributes, line breaks, and class token order.
 - Do not write tests whose primary assertions are about package.json, package-lock.json, tsconfig.json, dependencies, scripts, or compilerOptions.
 - Prefer these real source targets when relevant: ${actualSourcePaths.join(", ") || "source files listed in the repository context"}.
-- ExecForge will update package.json to run "node --test"; write tests that this command will execute with npm test.`
+- ExecForge will update package.json to run "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=junit-results.xml"; write tests that this command will execute with npm test.
+- The dual reporters write human-readable output to stdout AND JUnit XML to junit-results.xml. The ExecForge SDK automatically discovers junit-results.xml and uploads test results — no additional user configuration is needed.`
     : `Use the test runner already configured in package.json or config files. If npm test would not execute your files, include that setup requirement in the generated files only when it does not require adding new locked dependencies.`;
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
