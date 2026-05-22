@@ -272,13 +272,16 @@ async function githubInstallationText(
   };
 
   const initial = await resolveGitHubRedirect(fullUrl, authHeaders);
+  console.log(`[execforge:logs] resolveGitHubRedirect result: status=${initial.status} redirectUrl=${initial.redirectUrl ? "yes" : "no"} bodyLen=${initial.body.length} body=${initial.body.slice(0, 300)}`);
 
   if (initial.redirectUrl) {
     // Fetch the presigned S3 URL with NO auth headers — S3 presigned URLs are
     // self-authenticating and reject additional auth headers.
     console.log(`[execforge:logs] following redirect → S3 (status=${initial.status})`);
     const s3 = await fetch(initial.redirectUrl);
-    return { ok: s3.ok, status: s3.status, text: await s3.text() };
+    const s3Text = await s3.text();
+    console.log(`[execforge:logs] S3 response: ok=${s3.ok} status=${s3.status} textLen=${s3Text.length}`);
+    return { ok: s3.ok, status: s3.status, text: s3Text };
   }
 
   const ok = initial.status >= 200 && initial.status < 300;
@@ -538,8 +541,11 @@ async function parseTestsFromWorkflowJobLogs(params: {
         params.installationId,
         `/repos/${params.owner}/${params.repo}/actions/jobs/${job.id}/logs`,
       );
-      console.log(`[execforge:tests] job ${job.id} logs fetch: ok=${response.ok} textLen=${response.text?.length ?? 0}`);
-      if (!response.ok || !response.text) continue;
+      console.log(`[execforge:tests] job ${job.id} logs fetch: ok=${response.ok} status=${response.status} textLen=${response.text?.length ?? 0}`);
+      if (!response.ok || !response.text) {
+        console.log(`[execforge:tests] job ${job.id} ERROR body: ${response.text?.slice(0, 500)}`);
+        continue;
+      }
       const jobTests = parseJUnitXmlFromLog(response.text);
       console.log(`[execforge:tests] job ${job.id} parsed ${jobTests.length} tests from JUnit XML`);
       if (jobTests.length === 0) {
