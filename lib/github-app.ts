@@ -225,8 +225,14 @@ async function githubInstallationText(
   init: RequestInit = {},
 ): Promise<{ ok: boolean; status: number; text: string }> {
   const token = await getInstallationAccessToken(installationId);
+
+  // Use redirect:"manual" so we can intercept the 302 that GitHub's job-logs
+  // endpoint returns. If fetch auto-follows, it sends the Bearer token to the
+  // presigned S3 URL — S3 rejects that with SignatureDoesNotMatch (the 158-byte
+  // error body we were seeing). We follow the redirect ourselves, without auth.
   const response = await fetch(path.startsWith("https://") ? path : `${GITHUB_API_BASE}${path}`, {
     ...init,
+    redirect: "manual",
     headers: {
       Accept: "text/plain",
       Authorization: `Bearer ${token}`,
@@ -234,6 +240,14 @@ async function githubInstallationText(
       ...(init.headers ?? {}),
     },
   });
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (location) {
+      const redirected = await fetch(location, { redirect: "follow" });
+      return { ok: redirected.ok, status: redirected.status, text: await redirected.text() };
+    }
+  }
 
   return {
     ok: response.ok,
