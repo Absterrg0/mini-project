@@ -267,7 +267,7 @@ async function githubInstallationText(
   // which causes a SignatureDoesNotMatch error (the 158-byte response we observed).
   const authHeaders: Record<string, string> = {
     "User-Agent": "ExecForge-App",
-    Accept: "text/plain",
+    Accept: "application/vnd.github+json",
     Authorization: `Bearer ${token}`,
     "X-GitHub-Api-Version": GITHUB_API_VERSION,
   };
