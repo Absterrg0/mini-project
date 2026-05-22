@@ -191,6 +191,8 @@ async function processWebhook(event: string, payload: GitHubWebhookPayload) {
     const runAttempt = workflowJob.run_attempt ?? payload.workflow_run?.run_attempt ?? 1;
     const runId = `${workflowJob.run_id}:${runAttempt}`;
 
+    console.log(`[execforge:webhook] workflow_job completed \u2014 repo=${repositoryFullName} runId=${runId} jobId=${workflowJob.id} jobName="${workflowJob.name}" conclusion=${workflowJob.conclusion}`);
+
     // The workflow_job completed event fires only after the job is fully done —
     // GitHub guarantees log files are finalized at this point. Run the test
     // backfill synchronously with a single attempt so we don't need after() at all.
@@ -201,6 +203,8 @@ async function processWebhook(event: string, payload: GitHubWebhookPayload) {
         maxAttempts: 1,
         delayMs: 0,
       });
+
+      console.log(`[execforge:webhook] workflow_job backfill result: ${JSON.stringify(backfill)}`);
 
       await recordIngestionEvent({
         eventType: "github.workflow_job_test_backfill",

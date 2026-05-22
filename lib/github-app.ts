@@ -380,19 +380,21 @@ function fileFromJUnit(fileAttr: string, classname: string, testName: string): s
  * Returns null if no JUnit XML is found.
  */
 function extractJUnitXml(log: string): string | null {
-  // Normalize: strip GitHub Actions timestamps and ANSI codes from every line,
-  // then join so we reconstruct the original multi-line XML.
   const text = log.split(/\r?\n/).map(normalizeLogLine).join("\n");
-
-  // Locate the opening tag — accept both an XML preamble and a bare <testsuites>.
   const openIdx = text.search(/<testsuites[\s>]/);
-  if (openIdx === -1) return null;
-
+  if (openIdx === -1) {
+    console.log(`[execforge:tests] extractJUnitXml — no <testsuites> found in ${text.length} char log`);
+    return null;
+  }
   const closeTag = "</testsuites>";
   const closeIdx = text.indexOf(closeTag, openIdx);
-  if (closeIdx === -1) return null;
-
-  return text.slice(openIdx, closeIdx + closeTag.length);
+  if (closeIdx === -1) {
+    console.log(`[execforge:tests] extractJUnitXml — found <testsuites> at ${openIdx} but no closing tag`);
+    return null;
+  }
+  const xml = text.slice(openIdx, closeIdx + closeTag.length);
+  console.log(`[execforge:tests] extractJUnitXml — extracted ${xml.length} chars of XML`);
+  return xml;
 }
 
 /**
@@ -479,23 +481,37 @@ async function parseTestsFromWorkflowJobLogs(params: {
   jobs: GitHubWorkflowJob[];
 }) {
   const parsed: ParsedJUnitTest[] = [];
+  console.log(`[execforge:tests] parseTestsFromWorkflowJobLogs — ${params.jobs.length} jobs for ${params.owner}/${params.repo}`);
 
   for (const job of params.jobs) {
-    if (!job.completed_at) continue;
+    console.log(`[execforge:tests] job ${job.id} name="${job.name}" completed_at=${job.completed_at ?? "null"} conclusion=${job.conclusion ?? "null"}`);
+    if (!job.completed_at) {
+      console.log(`[execforge:tests] job ${job.id} skipped — not yet completed`);
+      continue;
+    }
 
     try {
       const response = await githubInstallationText(
         params.installationId,
         `/repos/${params.owner}/${params.repo}/actions/jobs/${job.id}/logs`,
       );
+      console.log(`[execforge:tests] job ${job.id} logs fetch: ok=${response.ok} textLen=${response.text?.length ?? 0}`);
       if (!response.ok || !response.text) continue;
-      parsed.push(...parseJUnitXmlFromLog(response.text));
+      const jobTests = parseJUnitXmlFromLog(response.text);
+      console.log(`[execforge:tests] job ${job.id} parsed ${jobTests.length} tests from JUnit XML`);
+      if (jobTests.length === 0) {
+        // Print the first 500 chars of the log to show what we got
+        console.log(`[execforge:tests] job ${job.id} log sample (first 500 chars):`, response.text.slice(0, 500));
+      }
+      parsed.push(...jobTests);
     } catch (error) {
-      console.warn(`Unable to parse tests from GitHub job ${job.id} logs`, error);
+      console.warn(`[execforge:tests] Unable to parse tests from GitHub job ${job.id} logs`, error);
     }
   }
 
-  return aggregateParsedTests(parsed);
+  const aggregated = aggregateParsedTests(parsed);
+  console.log(`[execforge:tests] parseTestsFromWorkflowJobLogs — aggregated to ${aggregated.length} test signals`);
+  return aggregated;
 }
 
 export async function loadTestsFromGitHubWorkflowRun(params: {

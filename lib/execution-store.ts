@@ -1020,11 +1020,13 @@ export async function backfillWorkflowRunTestsFromGitHub(params: {
   });
 
   if (!repository) {
+    console.log(`[execforge:backfill] repository_not_found for ${params.repositoryFullName}`);
     return { updated: false, reason: "repository_not_found", testCount: 0 };
   }
 
   const installationId = await getRepositoryInstallationId(params.repositoryFullName);
   if (!installationId) {
+    console.log(`[execforge:backfill] installation_not_found for ${params.repositoryFullName}`);
     return { updated: false, reason: "installation_not_found", testCount: 0 };
   }
 
@@ -1032,6 +1034,8 @@ export async function backfillWorkflowRunTestsFromGitHub(params: {
   const maxAttempts = Math.max(1, params.maxAttempts ?? 4);
   const delayMs = Math.max(0, params.delayMs ?? 7_500);
   let sawRun = false;
+
+  console.log(`[execforge:backfill] starting — runId=${params.runId} workflowRunId=${workflowRunId} repo=${params.repositoryFullName} maxAttempts=${maxAttempts}`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (attempt > 1 && delayMs > 0) {
@@ -1049,14 +1053,19 @@ export async function backfillWorkflowRunTestsFromGitHub(params: {
         },
       });
 
+      console.log(`[execforge:backfill] attempt ${attempt}: existingRun=${existingRun ? `found (repoId=${existingRun.repositoryId})` : "null"} expectedRepoId=${repository.id}`);
+
       if (!existingRun || existingRun.repositoryId !== repository.id) {
+        console.log(`[execforge:backfill] attempt ${attempt}: run not found or repo mismatch, continuing`);
         continue;
       }
 
       sawRun = true;
-
       const existingTests = Array.isArray(existingRun.tests) ? existingRun.tests : [];
+      console.log(`[execforge:backfill] attempt ${attempt}: existingTests.length=${existingTests.length}`);
+
       if (existingTests.length > 0) {
+        console.log(`[execforge:backfill] already_has_tests (${existingTests.length}), skipping`);
         return { updated: false, reason: "already_has_tests", testCount: existingTests.length };
       }
 
@@ -1065,6 +1074,8 @@ export async function backfillWorkflowRunTestsFromGitHub(params: {
         repositoryFullName: params.repositoryFullName,
         workflowRunId,
       });
+
+      console.log(`[execforge:backfill] attempt ${attempt}: loadTestsFromGitHubWorkflowRun returned ${tests.length} tests`);
 
       if (tests.length === 0) {
         continue;
@@ -1079,13 +1090,16 @@ export async function backfillWorkflowRunTestsFromGitHub(params: {
         },
       });
 
+      console.log(`[execforge:backfill] ✓ wrote ${tests.length} tests to DB for runId=${params.runId}`);
       return { updated: true, reason: "updated", testCount: tests.length };
     } catch (error) {
       if (attempt === maxAttempts) {
-        console.warn("Unable to backfill test signals from GitHub job logs", error);
+        console.warn("[execforge:backfill] Unable to backfill test signals from GitHub job logs", error);
       }
     }
   }
 
-  return { updated: false, reason: sawRun ? "tests_not_found" : "run_not_found", testCount: 0 };
+  const reason = sawRun ? "tests_not_found" as const : "run_not_found" as const;
+  console.log(`[execforge:backfill] done — sawRun=${sawRun} reason=${reason}`);
+  return { updated: false, reason, testCount: 0 };
 }
