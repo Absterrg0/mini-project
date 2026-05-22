@@ -151,7 +151,6 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
   const criticalTests = triageTests.filter(t => t.flakeRate >= 50);
   const watchTests = triageTests.filter(t => t.flakeRate >= 15 && t.flakeRate < 50);
   const healthyTests = triageTests.filter(t => t.totalFailures === 0);
-  const slowestTest = [...triageTests].sort((a, b) => b.avgDurationSec - a.avgDurationSec)[0];
 
   return (
     <div className="fade-up flex flex-col min-h-0">
@@ -238,9 +237,9 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
               </div>
               <div className="grid grid-cols-3 divide-x divide-border">
                 {[
-                  { label: "Critical", count: criticalTests.length, desc: "≥50% failure rate", color: "text-red-400", bg: "bg-red-500/10", icon: XCircle },
-                  { label: "Flaky", count: watchTests.length, desc: "15–50% failure rate", color: "text-amber-400", bg: "bg-amber-500/10", icon: AlertTriangle },
-                  { label: "Passing", count: healthyTests.length, desc: "0 failures recorded", color: "text-emerald-400", bg: "bg-emerald-500/10", icon: CheckCircle2 },
+                  { label: "Critical", count: criticalTests.length, color: "text-red-400", bg: "bg-red-500/10", icon: XCircle },
+                  { label: "Flaky", count: watchTests.length, color: "text-amber-400", bg: "bg-amber-500/10", icon: AlertTriangle },
+                  { label: "Passing", count: healthyTests.length, color: "text-emerald-400", bg: "bg-emerald-500/10", icon: CheckCircle2 },
                 ].map(s => (
                   <div key={s.label} className="flex flex-col items-center justify-center py-6 gap-2">
                     <div className={`flex h-10 w-10 items-center justify-center rounded-full ${s.bg}`}>
@@ -248,7 +247,6 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
                     </div>
                     <p className={`text-3xl font-bold ${s.color}`}>{s.count}</p>
                     <p className="text-xs font-medium text-foreground">{s.label}</p>
-                    <p className="text-[10px] text-muted-foreground">{s.desc}</p>
                   </div>
                 ))}
               </div>
@@ -260,36 +258,51 @@ export default async function TestsPage({ searchParams }: { searchParams: Promis
                     <div className="bg-amber-500 transition-all" style={{ width: `${(watchTests.length / uniqueTestCount) * 100}%` }} />
                     <div className="bg-emerald-500 transition-all" style={{ width: `${(healthyTests.length / uniqueTestCount) * 100}%` }} />
                   </div>
-                  <div className="mt-2 flex gap-4 text-[10px] text-muted-foreground">
-                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-red-500" /> Critical</span>
-                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-amber-500" /> Flaky</span>
-                    <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full bg-emerald-500" /> Passing</span>
-                  </div>
                 </div>
               )}
             </div>
 
-            {/* Stats sidebar */}
+            {/* Slow Tests Analysis */}
             <div className="rounded-xl border border-border bg-card overflow-hidden">
-              <div className="px-5 py-3.5 border-b border-border">
-                <h2 className="text-sm font-semibold">Quick Stats</h2>
+              <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
+                <div className="flex items-center gap-2">
+                  <Clock size={14} className="text-amber-400" />
+                  <h2 className="text-sm font-semibold">Slowest Tests</h2>
+                </div>
+                <span className="text-[11px] font-mono text-muted-foreground">
+                  avg {totalRuns > 0 ? formatDuration(Math.round(aggregated.reduce((s, t) => s + t.avgDurationSec * t.totalRuns, 0) / totalRuns)) : "—"}
+                </span>
               </div>
-              <div className="divide-y divide-border">
-                {[
-                  { label: "Total retries", value: totalRetries.toLocaleString(), icon: Activity, color: "text-violet-400" },
-                  { label: "Slowest test", value: slowestTest ? formatDuration(Math.round(slowestTest.avgDurationSec)) : "—", icon: Clock, color: "text-amber-400" },
-                  { label: "Most impacted file", value: files[0]?.file.split("/").pop() ?? "—", icon: FileCode2, color: "text-red-400" },
-                  { label: "Avg test duration", value: totalRuns > 0 ? formatDuration(Math.round(aggregated.reduce((s, t) => s + t.avgDurationSec * t.totalRuns, 0) / totalRuns)) : "—", icon: Zap, color: "text-blue-400" },
-                ].map(s => (
-                  <div key={s.label} className="flex items-center justify-between px-5 py-3">
-                    <div className="flex items-center gap-2.5">
-                      <s.icon size={13} className={s.color} />
-                      <span className="text-xs text-muted-foreground">{s.label}</span>
-                    </div>
-                    <span className="text-xs font-mono font-semibold text-foreground truncate max-w-[120px]">{s.value}</span>
+              {(() => {
+                const sorted = [...triageTests].sort((a, b) => b.avgDurationSec - a.avgDurationSec).slice(0, 5);
+                const maxDur = sorted[0]?.avgDurationSec ?? 1;
+                return sorted.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-10 text-center px-6">
+                    <Clock size={28} className="text-muted-foreground/40 mb-2" />
+                    <p className="text-xs text-muted-foreground">No duration data yet</p>
                   </div>
-                ))}
-              </div>
+                ) : (
+                  <div className="divide-y divide-border/50">
+                    {sorted.map((t) => (
+                      <div key={t.key} className="px-4 py-3">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <p className="truncate text-[11px] font-medium text-foreground max-w-[200px]" title={t.name}>{t.name}</p>
+                          <span className={`text-[11px] font-mono font-semibold ${t.avgDurationSec > 3 ? "text-amber-400" : t.avgDurationSec > 1 ? "text-blue-400" : "text-emerald-400"}`}>
+                            {formatDuration(Math.round(t.avgDurationSec))}
+                          </span>
+                        </div>
+                        <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                          <div
+                            className={`h-full rounded-full transition-all ${t.avgDurationSec > 3 ? "bg-gradient-to-r from-amber-500 to-orange-400" : t.avgDurationSec > 1 ? "bg-blue-500" : "bg-emerald-500"}`}
+                            style={{ width: `${Math.max(4, (t.avgDurationSec / maxDur) * 100)}%` }}
+                          />
+                        </div>
+                        <p className="mt-1 truncate text-[10px] font-mono text-muted-foreground">{t.file}</p>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}  
             </div>
           </div>
 
