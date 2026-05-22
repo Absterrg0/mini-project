@@ -1,4 +1,5 @@
 import { createHmac, sign } from "node:crypto";
+import { get as httpsGet } from "node:https";
 import type { JobExecution, StepExecution, TestSignal, WorkflowRun } from "@/app/lib/types";
 import { prisma } from "@/lib/prisma";
 
@@ -219,41 +220,69 @@ export async function githubInstallationRequest<T>(
   return githubRequest<T>(path, token, init);
 }
 
+/**
+ * Use Node.js's native https module (NOT patched by Next.js) to make the
+ * initial request to a GitHub API endpoint and return the raw body or the
+ * redirect Location if the server responds with a 3xx.
+ *
+ * This is necessary because Next.js patches the global `fetch` and silently
+ * ignores `redirect: "manual"`, so we cannot use fetch to intercept GitHub's
+ * 302 redirect to a presigned S3 URL.
+ */
+function resolveGitHubRedirect(
+  url: string,
+  headers: Record<string, string>,
+): Promise<{ redirectUrl: string | null; status: number; body: string }> {
+  return new Promise((resolve) => {
+    const req = httpsGet(url, { headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const isRedirect = res.statusCode !== undefined && res.statusCode >= 300 && res.statusCode < 400;
+        resolve({
+          redirectUrl: isRedirect ? (res.headers.location ?? null) : null,
+          status: res.statusCode ?? 0,
+          body,
+        });
+      });
+    });
+    req.on("error", (err) => resolve({ redirectUrl: null, status: 0, body: String(err) }));
+    req.setTimeout(20_000, () => { req.destroy(); resolve({ redirectUrl: null, status: 0, body: "timeout" }); });
+  });
+}
+
 async function githubInstallationText(
   installationId: string | number,
   path: string,
   init: RequestInit = {},
 ): Promise<{ ok: boolean; status: number; text: string }> {
   const token = await getInstallationAccessToken(installationId);
+  const fullUrl = path.startsWith("https://") ? path : `${GITHUB_API_BASE}${path}`;
 
-  // Use redirect:"manual" so we can intercept the 302 that GitHub's job-logs
-  // endpoint returns. If fetch auto-follows, it sends the Bearer token to the
-  // presigned S3 URL — S3 rejects that with SignatureDoesNotMatch (the 158-byte
-  // error body we were seeing). We follow the redirect ourselves, without auth.
-  const response = await fetch(path.startsWith("https://") ? path : `${GITHUB_API_BASE}${path}`, {
-    ...init,
-    redirect: "manual",
-    headers: {
-      Accept: "text/plain",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": GITHUB_API_VERSION,
-      ...(init.headers ?? {}),
-    },
-  });
+  // Use Node's https module (unpatched by Next.js) to make the initial request.
+  // GitHub's /actions/jobs/{id}/logs endpoint returns a 302 to a presigned S3
+  // URL. Next.js's fetch wrapper ignores `redirect:"manual"`, so if we used
+  // fetch it would auto-follow the redirect — sending our Bearer token to S3
+  // which causes a SignatureDoesNotMatch error (the 158-byte response we observed).
+  const authHeaders: Record<string, string> = {
+    Accept: "text/plain",
+    Authorization: `Bearer ${token}`,
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
+  };
 
-  if (response.status >= 300 && response.status < 400) {
-    const location = response.headers.get("location");
-    if (location) {
-      const redirected = await fetch(location, { redirect: "follow" });
-      return { ok: redirected.ok, status: redirected.status, text: await redirected.text() };
-    }
+  const initial = await resolveGitHubRedirect(fullUrl, authHeaders);
+
+  if (initial.redirectUrl) {
+    // Fetch the presigned S3 URL with NO auth headers — S3 presigned URLs are
+    // self-authenticating and reject additional auth headers.
+    console.log(`[execforge:logs] following redirect → S3 (status=${initial.status})`);
+    const s3 = await fetch(initial.redirectUrl);
+    return { ok: s3.ok, status: s3.status, text: await s3.text() };
   }
 
-  return {
-    ok: response.ok,
-    status: response.status,
-    text: await response.text(),
-  };
+  const ok = initial.status >= 200 && initial.status < 300;
+  return { ok, status: initial.status, text: initial.body };
 }
 
 function orgFromRepository(repository: GitHubRepository): { slug: string; name: string } {
