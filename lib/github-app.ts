@@ -266,6 +266,7 @@ async function githubInstallationText(
   // fetch it would auto-follow the redirect — sending our Bearer token to S3
   // which causes a SignatureDoesNotMatch error (the 158-byte response we observed).
   const authHeaders: Record<string, string> = {
+    "User-Agent": "ExecForge-App",
     Accept: "text/plain",
     Authorization: `Bearer ${token}`,
     "X-GitHub-Api-Version": GITHUB_API_VERSION,
