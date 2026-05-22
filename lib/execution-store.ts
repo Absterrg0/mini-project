@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { assessDeploymentRisk } from "@/app/lib/intelligence";
 import type {
   IngestionPipeline,
@@ -12,6 +13,7 @@ import {
   GitHubAppConfigurationError,
   getRepositoryInstallationId,
   githubInstallationRequest,
+  loadTestsFromGitHubWorkflowRun,
   syncConnectedGitHubInstallations,
 } from "./github-app";
 import { prisma } from "./prisma";
@@ -25,6 +27,147 @@ export interface ExecutionSnapshot {
 
 function toJson(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
+}
+
+const globalForIngestionEvents = globalThis as unknown as {
+  ingestionEventWriteQueue?: Promise<void>;
+};
+
+const transientDatabaseErrorCodes = new Set([
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "57P01",
+  "57P02",
+  "57P03",
+]);
+
+function getErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function isTransientDatabaseError(error: unknown): boolean {
+  const code = getErrorCode(error);
+  return code ? transientDatabaseErrorCodes.has(code) : false;
+}
+
+async function wait(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryTransientDatabaseError<T>(operation: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientDatabaseError(error) || attempt === 2) break;
+      await wait(150 * 2 ** attempt);
+    }
+  }
+
+  throw lastError;
+}
+
+function enqueueIngestionEventWrite(operation: () => Promise<void>) {
+  const previous = globalForIngestionEvents.ingestionEventWriteQueue ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(() => retryTransientDatabaseError(operation));
+
+  globalForIngestionEvents.ingestionEventWriteQueue = next.catch(() => undefined);
+
+  return next;
+}
+
+async function writeIngestionEvent(params: {
+  organizationId?: string | null;
+  repositoryFullName?: string | null;
+  externalRunId?: string | null;
+  eventType: string;
+  source: string;
+  status: "accepted" | "processed" | "rejected";
+  error?: string | null;
+  payload: unknown;
+  processedAt?: Date | null;
+  idempotencyKey?: string | null;
+}) {
+  const payload = JSON.stringify(params.payload);
+
+  if (params.idempotencyKey) {
+    await prisma.$executeRawUnsafe(
+      `
+        insert into "IngestionEvent" (
+          "id",
+          "organizationId",
+          "repositoryFullName",
+          "externalRunId",
+          "idempotencyKey",
+          "eventType",
+          "source",
+          "status",
+          "error",
+          "payload",
+          "processedAt"
+        )
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+        on conflict ("idempotencyKey") do update set
+          "organizationId" = excluded."organizationId",
+          "repositoryFullName" = excluded."repositoryFullName",
+          "externalRunId" = excluded."externalRunId",
+          "eventType" = excluded."eventType",
+          "source" = excluded."source",
+          "status" = excluded."status",
+          "error" = excluded."error",
+          "payload" = excluded."payload",
+          "processedAt" = excluded."processedAt"
+      `,
+      randomUUID(),
+      params.organizationId ?? null,
+      params.repositoryFullName ?? null,
+      params.externalRunId ?? null,
+      params.idempotencyKey,
+      params.eventType,
+      params.source,
+      params.status,
+      params.error ?? null,
+      payload,
+      params.processedAt ?? null,
+    );
+    return;
+  }
+
+  await prisma.$executeRawUnsafe(
+    `
+      insert into "IngestionEvent" (
+        "id",
+        "organizationId",
+        "repositoryFullName",
+        "externalRunId",
+        "eventType",
+        "source",
+        "status",
+        "error",
+        "payload",
+        "processedAt"
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+    `,
+    randomUUID(),
+    params.organizationId ?? null,
+    params.repositoryFullName ?? null,
+    params.externalRunId ?? null,
+    params.eventType,
+    params.source,
+    params.status,
+    params.error ?? null,
+    payload,
+    params.processedAt ?? null,
+  );
 }
 
 function mapOrganizationRecord(org: {
@@ -453,11 +596,11 @@ export async function loadExistingPlans(params: {
       baseBranch: r.baseBranch,
       title: r.title,
       body: r.body,
-      risk: r.risk as any,
+      risk: r.risk as OptimizationPullRequestPlan["risk"],
       estimatedTimeSavingsPct: r.estimatedTimeSavingsPct,
       estimatedCostSavingsUsdMonthly: r.estimatedCostSavingsUsdMonthly,
-      files: Array.isArray(r.files) ? (r.files as any) : [],
-      guardrails: Array.isArray(r.guardrails) ? (r.guardrails as any) : [],
+      files: Array.isArray(r.files) ? (r.files as unknown as OptimizationPullRequestPlan["files"]) : [],
+      guardrails: Array.isArray(r.guardrails) ? (r.guardrails as OptimizationPullRequestPlan["guardrails"]) : [],
     };
 
     return {
@@ -499,23 +642,12 @@ export async function recordIngestionEvent(params: {
     processedAt: params.status === "processed" ? new Date() : undefined,
   };
 
-  if (params.idempotencyKey) {
-    await prisma.ingestionEvent.upsert({
-      where: {
-        idempotencyKey: params.idempotencyKey,
-      },
-      update: data,
-      create: {
-        ...data,
-        idempotencyKey: params.idempotencyKey,
-      },
-    });
-    return;
-  }
-
-  await prisma.ingestionEvent.create({
-    data,
-  });
+  await enqueueIngestionEventWrite(() =>
+    writeIngestionEvent({
+      ...data,
+      idempotencyKey: params.idempotencyKey,
+    }),
+  );
 }
 
 export async function ingestWorkflowRun(params: {
@@ -811,6 +943,12 @@ export async function attachRuntimeTelemetry(params: {
     : startedAt;
   const durationSec = Math.max(0, Math.round((finishedAt.getTime() - startedAt.getTime()) / 1000));
   const status = params.telemetry.exitCode && params.telemetry.exitCode !== 0 ? "failed" : "success";
+  // Preserve any tests already written to this run (e.g. from a prior webhook event).
+  // Do NOT attempt to fetch tests from GitHub here — the SDK posts telemetry while the
+  // job is still in-progress, so the logs API will not yet contain test output.
+  // Test parsing is handled by the workflow_job completed webhook handler, which fires
+  // after the job is fully done and log files are guaranteed available.
+  const tests: unknown = Array.isArray(existingRun?.tests) ? existingRun.tests : [];
 
   await prisma.$transaction([
     prisma.workflowRunSnapshot.upsert({
@@ -821,6 +959,7 @@ export async function attachRuntimeTelemetry(params: {
         telemetrySource: params.telemetry.source,
         telemetryWrapperVersion: params.telemetry.wrapperVersion,
         runtimeTelemetry: toJson(params.telemetry),
+        tests: toJson(tests),
       },
       create: {
         repositoryId: repository.id,
@@ -834,7 +973,7 @@ export async function attachRuntimeTelemetry(params: {
         containerLayerReuse: 0,
         changedFiles: [],
         jobs: [],
-        tests: [],
+        tests: toJson(tests),
         telemetrySource: params.telemetry.source,
         telemetryWrapperVersion: params.telemetry.wrapperVersion,
         runtimeTelemetry: toJson(params.telemetry),
@@ -853,4 +992,100 @@ export async function attachRuntimeTelemetry(params: {
   ]);
 
   return { attached: true, reason: null };
+}
+
+export async function backfillWorkflowRunTestsFromGitHub(params: {
+  repositoryFullName: string;
+  runId: string;
+  maxAttempts?: number;
+  delayMs?: number;
+}): Promise<{
+  updated: boolean;
+  reason:
+    | "updated"
+    | "already_has_tests"
+    | "repository_not_found"
+    | "run_not_found"
+    | "installation_not_found"
+    | "tests_not_found";
+  testCount: number;
+}> {
+  const repository = await prisma.executionRepository.findUnique({
+    where: {
+      fullName: params.repositoryFullName,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!repository) {
+    return { updated: false, reason: "repository_not_found", testCount: 0 };
+  }
+
+  const installationId = await getRepositoryInstallationId(params.repositoryFullName);
+  if (!installationId) {
+    return { updated: false, reason: "installation_not_found", testCount: 0 };
+  }
+
+  const workflowRunId = params.runId.split(":")[0];
+  const maxAttempts = Math.max(1, params.maxAttempts ?? 4);
+  const delayMs = Math.max(0, params.delayMs ?? 7_500);
+  let sawRun = false;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (attempt > 1 && delayMs > 0) {
+      await wait(delayMs * attempt);
+    }
+
+    try {
+      const existingRun = await prisma.workflowRunSnapshot.findUnique({
+        where: {
+          externalRunId: params.runId,
+        },
+        select: {
+          repositoryId: true,
+          tests: true,
+        },
+      });
+
+      if (!existingRun || existingRun.repositoryId !== repository.id) {
+        continue;
+      }
+
+      sawRun = true;
+
+      const existingTests = Array.isArray(existingRun.tests) ? existingRun.tests : [];
+      if (existingTests.length > 0) {
+        return { updated: false, reason: "already_has_tests", testCount: existingTests.length };
+      }
+
+      const tests = await loadTestsFromGitHubWorkflowRun({
+        installationId,
+        repositoryFullName: params.repositoryFullName,
+        workflowRunId,
+      });
+
+      if (tests.length === 0) {
+        continue;
+      }
+
+      await prisma.workflowRunSnapshot.update({
+        where: {
+          externalRunId: params.runId,
+        },
+        data: {
+          tests: toJson(tests),
+        },
+      });
+
+      return { updated: true, reason: "updated", testCount: tests.length };
+    } catch (error) {
+      if (attempt === maxAttempts) {
+        console.warn("Unable to backfill test signals from GitHub job logs", error);
+      }
+    }
+  }
+
+  return { updated: false, reason: sawRun ? "tests_not_found" : "run_not_found", testCount: 0 };
 }

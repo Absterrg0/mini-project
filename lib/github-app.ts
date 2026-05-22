@@ -1,5 +1,5 @@
 import { createHmac, sign } from "node:crypto";
-import type { JobExecution, StepExecution, WorkflowRun } from "@/app/lib/types";
+import type { JobExecution, StepExecution, TestSignal, WorkflowRun } from "@/app/lib/types";
 import { prisma } from "@/lib/prisma";
 
 const GITHUB_API_VERSION = "2022-11-28";
@@ -57,6 +57,13 @@ interface GitHubWorkflowJobsResponse {
   jobs?: GitHubWorkflowJob[];
 }
 
+interface ParsedJUnitTest {
+  name: string;
+  file: string;
+  failed: boolean;
+  durationSec: number;
+}
+
 export interface GitHubWorkflowRunPayload {
   id: number;
   name?: string | null;
@@ -84,6 +91,14 @@ export interface GitHubWebhookPayload {
   repositories_removed?: GitHubRepository[];
   repository?: GitHubRepository;
   workflow_run?: GitHubWorkflowRunPayload;
+  workflow_job?: {
+    id?: number;
+    run_id?: number;
+    run_attempt?: number | null;
+    name?: string | null;
+    status?: string | null;
+    conclusion?: string | null;
+  };
 }
 
 export class GitHubAppConfigurationError extends Error {}
@@ -204,6 +219,29 @@ export async function githubInstallationRequest<T>(
   return githubRequest<T>(path, token, init);
 }
 
+async function githubInstallationText(
+  installationId: string | number,
+  path: string,
+  init: RequestInit = {},
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const token = await getInstallationAccessToken(installationId);
+  const response = await fetch(path.startsWith("https://") ? path : `${GITHUB_API_BASE}${path}`, {
+    ...init,
+    headers: {
+      Accept: "text/plain",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
+      ...(init.headers ?? {}),
+    },
+  });
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: await response.text(),
+  };
+}
+
 function orgFromRepository(repository: GitHubRepository): { slug: string; name: string } {
   return {
     slug: repository.owner.login.toLowerCase(),
@@ -255,6 +293,228 @@ function mapStepStatus(conclusion?: string | null): StepExecution["status"] {
     return "retried";
   }
   return "failed";
+}
+
+function stripAnsi(value: string) {
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function normalizeLogLine(line: string) {
+  return stripAnsi(line)
+    .replace(/^\d{4}-\d{2}-\d{2}T[^\s]+\s+/, "")
+    .trimEnd();
+}
+
+/** Decode the five XML predefined entities. */
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+/**
+ * Extract a single XML attribute value from a tag's attribute string.
+ * Handles both double-quoted and single-quoted values.
+ */
+function xmlAttr(attrs: string, name: string): string {
+  const re = new RegExp(`\\b${name}="([^"]*)"`, "i");
+  const dq = attrs.match(re);
+  if (dq?.[1] !== undefined) return decodeXmlEntities(dq[1]);
+  const sq = attrs.match(new RegExp(`\\b${name}='([^']*)'`, "i"));
+  return sq?.[1] !== undefined ? decodeXmlEntities(sq[1]) : "";
+}
+
+/**
+ * Resolve the best possible file path from JUnit `file` and `classname` attributes.
+ *
+ * node --test --test-reporter=junit puts the absolute file path in `file`
+ * (e.g. "/home/runner/work/repo/test/foo.test.js") and just "test" in `classname`.
+ * We prefer `file`, strip the runner workspace prefix, and fall back through
+ * `classname` to a slug derived from the test name.
+ */
+function fileFromJUnit(fileAttr: string, classname: string, testName: string): string {
+  // Prefer the `file` attribute — it contains the absolute path on the runner.
+  if (fileAttr && fileAttr !== "[eval]") {
+    // Strip common GitHub Actions runner prefixes so we get a repo-relative path.
+    // Pattern: /home/runner/work/<repo>/<repo>/  or  /home/runner/work/_temp/*
+    const stripped = fileAttr
+      .replace(/\\/g, "/")
+      .replace(/^\/home\/runner\/work\/[^/]+\/[^/]+\//, "")
+      .replace(/^\/github\/workspace\//, "");
+    if (stripped && stripped !== fileAttr.replace(/\\/g, "/")) {
+      // Successfully stripped — return clean relative path
+      return stripped;
+    }
+    // Fall back to last two segments of the absolute path (e.g. test/foo.test.js)
+    const parts = fileAttr.replace(/\\/g, "/").split("/").filter(Boolean);
+    if (parts.length >= 2) return parts.slice(-2).join("/");
+    if (parts.length === 1) return parts[0];
+  }
+
+  // `classname` from non-node runners (Maven, pytest, etc.) uses dotted notation.
+  if (classname && classname !== "test" && classname !== "[eval]") {
+    if (classname.includes("/") || classname.includes("\\") || /\.[a-z]{2,5}$/.test(classname)) {
+      return classname.replace(/\\/g, "/");
+    }
+    // Dotted class name — convert to path (e.g. com.example.MyTest → com/example/MyTest.test)
+    if (classname.includes(".")) {
+      return classname.replace(/\./g, "/") + ".test";
+    }
+  }
+
+  // Last resort: derive a slug from the test name.
+  const slug = testName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 60);
+  return `tests/${slug || "unknown"}.test.js`;
+}
+
+/**
+ * Find and return the raw `<testsuites>…</testsuites>` XML block embedded
+ * in a GitHub Actions job log (which has per-line ISO-8601 timestamps).
+ * Returns null if no JUnit XML is found.
+ */
+function extractJUnitXml(log: string): string | null {
+  // Normalize: strip GitHub Actions timestamps and ANSI codes from every line,
+  // then join so we reconstruct the original multi-line XML.
+  const text = log.split(/\r?\n/).map(normalizeLogLine).join("\n");
+
+  // Locate the opening tag — accept both an XML preamble and a bare <testsuites>.
+  const openIdx = text.search(/<testsuites[\s>]/);
+  if (openIdx === -1) return null;
+
+  const closeTag = "</testsuites>";
+  const closeIdx = text.indexOf(closeTag, openIdx);
+  if (closeIdx === -1) return null;
+
+  return text.slice(openIdx, closeIdx + closeTag.length);
+}
+
+/**
+ * Parse JUnit XML produced by `node --test --test-reporter=junit`
+ * (or any standard JUnit-compatible reporter) from a raw job log string.
+ *
+ * Handles:
+ * - Self-closing testcase elements (passing tests from node:test)
+ * - Regular testcase elements with <failure> or <error> children
+ * - XML entities in attribute values
+ */
+function parseJUnitXmlFromLog(log: string): ParsedJUnitTest[] {
+  const xml = extractJUnitXml(log);
+  if (!xml) return [];
+
+  const tests: ParsedJUnitTest[] = [];
+
+  // Match both self-closing `<testcase ... />` and paired `<testcase ...>...</testcase>`
+  const re = /<testcase\b([^>]*?)(\/?>)([\s\S]*?(?=<testcase\b|<\/testsuites))/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = re.exec(xml)) !== null) {
+    const attrs  = m[1];           // everything inside the opening tag
+    const selfClose = m[2] === "/>";
+    const body   = selfClose ? "" : m[3]; // content between open and next <testcase / </testsuites>
+
+    const name      = xmlAttr(attrs, "name");
+    const fileAttr  = xmlAttr(attrs, "file");
+    const classname = xmlAttr(attrs, "classname");
+    const timeStr   = xmlAttr(attrs, "time");
+
+    if (!name) continue;
+
+    // A test is failed if the element carries a failure/error attribute OR
+    // contains a <failure> or <error> child element.
+    const failed =
+      xmlAttr(attrs, "failure").length > 0 ||
+      /<failure[\s/>]/i.test(body) ||
+      /<error[\s/>]/i.test(body);
+
+    const durationSec = parseFloat(timeStr);
+
+    tests.push({
+      name,
+      file: fileFromJUnit(fileAttr, classname, name),
+      failed,
+      durationSec: Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : 0,
+    });
+  }
+
+  return tests;
+}
+
+function aggregateParsedTests(tests: ParsedJUnitTest[]): TestSignal[] {
+  const map = new Map<string, TestSignal>();
+
+  for (const test of tests) {
+    const key = `${test.file}::${test.name}`;
+    const current = map.get(key) ?? {
+      name: test.name,
+      file: test.file,
+      runs: 0,
+      failures: 0,
+      retries: 0,
+      avgDurationSec: 0,
+    };
+    const nextRuns = current.runs + 1;
+    current.avgDurationSec =
+      nextRuns > 0
+        ? (current.avgDurationSec * current.runs + test.durationSec) / nextRuns
+        : test.durationSec;
+    current.runs = nextRuns;
+    current.failures += test.failed ? 1 : 0;
+    map.set(key, current);
+  }
+
+  return [...map.values()];
+}
+
+async function parseTestsFromWorkflowJobLogs(params: {
+  installationId: string | number;
+  owner: string;
+  repo: string;
+  jobs: GitHubWorkflowJob[];
+}) {
+  const parsed: ParsedJUnitTest[] = [];
+
+  for (const job of params.jobs) {
+    if (!job.completed_at) continue;
+
+    try {
+      const response = await githubInstallationText(
+        params.installationId,
+        `/repos/${params.owner}/${params.repo}/actions/jobs/${job.id}/logs`,
+      );
+      if (!response.ok || !response.text) continue;
+      parsed.push(...parseJUnitXmlFromLog(response.text));
+    } catch (error) {
+      console.warn(`Unable to parse tests from GitHub job ${job.id} logs`, error);
+    }
+  }
+
+  return aggregateParsedTests(parsed);
+}
+
+export async function loadTestsFromGitHubWorkflowRun(params: {
+  installationId: string | number;
+  repositoryFullName: string;
+  workflowRunId: string | number;
+}) {
+  const [owner, repo] = params.repositoryFullName.split("/");
+  const jobsPayload = await githubInstallationFetch<GitHubWorkflowJobsResponse>(
+    params.installationId,
+    `/repos/${owner}/${repo}/actions/runs/${params.workflowRunId}/jobs?per_page=100`,
+  );
+
+  return parseTestsFromWorkflowJobLogs({
+    installationId: params.installationId,
+    owner,
+    repo,
+    jobs: jobsPayload.jobs ?? [],
+  });
 }
 
 function mapRepositoryDefaults(repository: GitHubRepository) {
@@ -477,7 +737,9 @@ export async function workflowRunFromGitHub(params: {
     params.installationId,
     `/repos/${owner}/${repo}/actions/runs/${params.workflowRun.id}/jobs?per_page=100`,
   );
-  const jobs = (jobsPayload.jobs ?? []).map((job): JobExecution => {
+  const githubJobs = jobsPayload.jobs ?? [];
+  const [jobs, tests] = await Promise.all([
+    Promise.resolve(githubJobs.map((job): JobExecution => {
     const durationSec = secondsBetween(job.started_at, job.completed_at);
     return {
       id: String(job.id),
@@ -505,7 +767,13 @@ export async function workflowRunFromGitHub(params: {
           };
         }) ?? [],
     };
-  });
+    })),
+    loadTestsFromGitHubWorkflowRun({
+      installationId: params.installationId,
+      repositoryFullName: params.repository.full_name,
+      workflowRunId: params.workflowRun.id,
+    }),
+  ]);
 
   const startedAt =
     params.workflowRun.run_started_at ??
@@ -528,7 +796,7 @@ export async function workflowRunFromGitHub(params: {
     containerLayerReuse: 0,
     changedFiles: [],
     jobs,
-    tests: [],
+    tests,
     telemetrySource: "github",
     runtimeTelemetry: {
       source: "github",

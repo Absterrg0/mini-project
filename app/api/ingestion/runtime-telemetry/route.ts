@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { attachRuntimeTelemetry, recordIngestionEvent } from "@/lib/execution-store";
+import { revalidateTag } from "next/cache";
+import {
+  attachRuntimeTelemetry,
+  recordIngestionEvent,
+} from "@/lib/execution-store";
 import { authorizeIngestionRequest } from "@/lib/ingestion-auth";
 import { validateRuntimeTelemetryEnvelope } from "@/lib/telemetry-contract";
 import { isExecForgeOwnedBranch } from "@/lib/branch-guard";
@@ -26,8 +30,10 @@ export async function POST(request: Request) {
     );
   }
 
+  const telemetryEnvelope = envelope.value;
+
   const authorization = await authorizeIngestionRequest(request, {
-    repositoryFullName: envelope.value.repositoryFullName,
+    repositoryFullName: telemetryEnvelope.repositoryFullName,
   });
 
   if (!authorization.ok) {
@@ -35,38 +41,38 @@ export async function POST(request: Request) {
       eventType: "runtime.telemetry",
       source: "execforge-runtime-action",
       status: "rejected",
-      repositoryFullName: envelope.value.repositoryFullName,
-      externalRunId: envelope.value.runId,
+      repositoryFullName: telemetryEnvelope.repositoryFullName,
+      externalRunId: telemetryEnvelope.runId,
       idempotencyKey,
       error: `auth_${authorization.reason}`,
-      payload: envelope.value,
+      payload: telemetryEnvelope,
     });
 
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   // Skip enriched telemetry from ExecForge's own optimization branches.
-  if (isExecForgeOwnedBranch(envelope.value.branch ?? "")) {
+  if (isExecForgeOwnedBranch(telemetryEnvelope.branch ?? "")) {
     await recordIngestionEvent({
       eventType: "runtime.telemetry",
       source: "execforge-runtime-action",
       status: "rejected",
-      repositoryFullName: envelope.value.repositoryFullName,
-      externalRunId: envelope.value.runId,
+      repositoryFullName: telemetryEnvelope.repositoryFullName,
+      externalRunId: telemetryEnvelope.runId,
       idempotencyKey,
       error: "exec_intel_branch_skipped",
-      payload: envelope.value,
+      payload: telemetryEnvelope,
     });
     return NextResponse.json({ ok: true, skipped: true, reason: "exec_intel_branch" });
   }
 
   const result = await attachRuntimeTelemetry({
-    repositoryFullName: envelope.value.repositoryFullName,
-    runId: envelope.value.runId,
-    workflowName: envelope.value.workflowName,
-    branch: envelope.value.branch,
-    commitSha: envelope.value.commitSha,
-    telemetry: envelope.value.telemetry,
+    repositoryFullName: telemetryEnvelope.repositoryFullName,
+    runId: telemetryEnvelope.runId,
+    workflowName: telemetryEnvelope.workflowName,
+    branch: telemetryEnvelope.branch,
+    commitSha: telemetryEnvelope.commitSha,
+    telemetry: telemetryEnvelope.telemetry,
     organizationId: authorization.type === "token" ? authorization.organizationId : undefined,
   });
 
@@ -75,11 +81,11 @@ export async function POST(request: Request) {
       eventType: "runtime.telemetry",
       source: "execforge-runtime-action",
       status: "rejected",
-      repositoryFullName: envelope.value.repositoryFullName,
-      externalRunId: envelope.value.runId,
+      repositoryFullName: telemetryEnvelope.repositoryFullName,
+      externalRunId: telemetryEnvelope.runId,
       idempotencyKey,
       error: result.reason ?? undefined,
-      payload: envelope.value,
+      payload: telemetryEnvelope,
     });
 
     return NextResponse.json(
@@ -92,11 +98,13 @@ export async function POST(request: Request) {
     eventType: "runtime.telemetry",
     source: "execforge-runtime-action",
     status: "processed",
-    repositoryFullName: envelope.value.repositoryFullName,
-    externalRunId: envelope.value.runId,
+    repositoryFullName: telemetryEnvelope.repositoryFullName,
+    externalRunId: telemetryEnvelope.runId,
     idempotencyKey,
-    payload: envelope.value,
+    payload: telemetryEnvelope,
   });
+
+  revalidateTag("execution-snapshot", { expire: 0 });
 
   return NextResponse.json({ ok: true });
 }
