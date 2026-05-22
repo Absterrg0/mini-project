@@ -136,6 +136,25 @@ model OptimizationPlanRecord {
   @@index([repositoryId, createdAt])
 }
 
+model TestScaffoldJob {
+  id                 String   @id @default(cuid())
+  userId             String
+  repositoryFullName String
+  flavor             String
+  status             String   @default("pending")
+  error              String?
+  prUrl              String?
+  branchName         String?
+  files              Json?
+  draftOnly          Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  completedAt        DateTime?
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
 model DeploymentRiskAssessment {
   id                   String                @id @default(cuid())
   repositoryId         String

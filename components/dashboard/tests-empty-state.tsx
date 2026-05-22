@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
@@ -8,7 +8,12 @@ import {
   Zap, AlertTriangle, Clock, Globe, TestTube2, Check, Copy, X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useGenerateTestsPR, type TestScaffoldFlavor, type GenerateTestsPRResult } from "@/lib/queries";
+import {
+  useGenerateTestsPR,
+  useTestScaffoldJob,
+  type TestScaffoldFlavor,
+  type GenerateTestsPRResult,
+} from "@/lib/queries";
 
 // ─── Test flavor definitions ──────────────────────────────────────────────────
 
@@ -107,7 +112,7 @@ function ResultPanel({
             <p className="text-xs text-muted-foreground mt-0.5">
               {result.prUrl
                 ? `Branch: ${result.branchName}`
-                : "GitHub App not installed — copy the files below"}
+                : "Copy the files below"}
             </p>
           </div>
         </div>
@@ -184,8 +189,40 @@ export function TestsEmptyState({
   repositoryFullName?: string;
 }) {
   const [selected, setSelected] = useState<TestScaffoldFlavor>("flaky");
-  const [result, setResult] = useState<GenerateTestsPRResult | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
+  const notifiedJobId = useRef<string | null>(null);
   const { mutate, isPending } = useGenerateTestsPR();
+  const { data: activeJob } = useTestScaffoldJob(activeJobId);
+
+  useEffect(() => {
+    if (!activeJob) return;
+    if (notifiedJobId.current === activeJob.jobId) return;
+
+    if (activeJob.status === "completed") {
+      notifiedJobId.current = activeJob.jobId;
+      if (activeJob.prUrl) {
+        toast.success("Pull Request opened!", {
+          description: "Your repo-aware sample tests are ready on GitHub.",
+          action: {
+            label: "View PR",
+            onClick: () => window.open(activeJob.prUrl!, "_blank", "noopener,noreferrer"),
+          },
+        });
+      } else {
+        toast.success("Test files generated", {
+          description: "Review the generated files below.",
+        });
+      }
+    }
+
+    if (activeJob.status === "failed") {
+      notifiedJobId.current = activeJob.jobId;
+      toast.error("Test scaffold failed", {
+        description: activeJob.error ?? "The background scaffold job failed.",
+      });
+    }
+  }, [activeJob]);
 
   function handleGenerate() {
     if (!repositoryFullName) {
@@ -199,26 +236,21 @@ export function TestsEmptyState({
       { repositoryFullName, flavor: selected },
       {
         onSuccess: (data) => {
-          setResult(data);
-          if (data.prUrl) {
-            toast.success("Pull Request opened!", {
-              description: "Your sample tests are ready on GitHub.",
-              action: {
-                label: "View PR",
-                onClick: () => window.open(data.prUrl!, "_blank", "noopener,noreferrer"),
-              },
-            });
-          } else {
-            toast.success("Test files generated", {
-              description: "Copy the files below and commit them to your repo.",
-            });
-          }
+          notifiedJobId.current = null;
+          setDismissedJobId(null);
+          setActiveJobId(data.jobId);
+          toast.info("Scaffold job started", {
+            description: "ExecForge is reading the repo and will open the PR in the background.",
+          });
         },
       },
     );
   }
 
   const selectedFlavor = TEST_FLAVORS.find((f) => f.id === selected)!;
+  const isTerminalJob = activeJob?.status === "completed" || activeJob?.status === "failed";
+  const isGenerating = isPending || Boolean(activeJobId && !isTerminalJob);
+  const result = activeJob?.status === "completed" && activeJob.jobId !== dismissedJobId ? activeJob : null;
 
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center px-6 py-12 text-center">
@@ -301,10 +333,10 @@ export function TestsEmptyState({
       <div className="flex flex-col items-center gap-3 w-full max-w-2xl">
         <Button
           onClick={handleGenerate}
-          disabled={isPending || !repositoryFullName}
+          disabled={isGenerating || !repositoryFullName}
           className="h-9 px-5 gap-2 text-sm font-medium"
         >
-          {isPending ? (
+          {isGenerating ? (
             <>
               <svg
                 className="size-3.5 animate-spin"
@@ -315,7 +347,7 @@ export function TestsEmptyState({
                 <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" strokeOpacity="0.25" />
                 <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
               </svg>
-              Generating {selectedFlavor.label}…
+              {activeJob?.status === "running" ? "Opening PR..." : `Starting ${selectedFlavor.label}...`}
             </>
           ) : (
             <>
@@ -338,14 +370,14 @@ export function TestsEmptyState({
           <p className="text-[11px] text-muted-foreground">
             Will open a PR on{" "}
             <span className="font-mono text-foreground/70">{repositoryFullName}</span>
-            {" "}· powered by AI
+            {" "}· repo-aware AI
           </p>
         )}
       </div>
 
       {/* Result panel */}
       {result && (
-        <ResultPanel result={result} onDismiss={() => setResult(null)} />
+        <ResultPanel result={result} onDismiss={() => setDismissedJobId(result.jobId)} />
       )}
 
       {/* Setup links */}

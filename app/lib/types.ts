@@ -74,6 +74,13 @@ export interface RuntimeTelemetry {
     message: string;
     source?: string;
   }>;
+  tests?: Array<{
+    name: string;
+    file: string;
+    durationSec: number;
+    failed: boolean;
+    failureMessage?: string;
+  }>;
 }
 
 export interface WorkflowRun {

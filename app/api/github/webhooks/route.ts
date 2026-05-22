@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { revalidateTag } from "next/cache";
 import { NextResponse } from "next/server";
 import {
-  backfillWorkflowRunTestsFromGitHub,
   ingestWorkflowRun,
   recordIngestionEvent,
 } from "@/lib/execution-store";
@@ -145,92 +144,11 @@ async function processWebhook(event: string, payload: GitHubWebhookPayload) {
 
     revalidateTag("execution-snapshot", { expire: 0 });
 
-    // When the workflow_run completes, also try a synchronous backfill as a
-    // safety net in case the workflow_job event did not arrive (e.g. unsubscribed).
-    // Use a very short retry window here since the job should already be done.
-    if (payload.action === "completed" && run.tests.length === 0) {
-      try {
-        const backfill = await backfillWorkflowRunTestsFromGitHub({
-          repositoryFullName: payload.repository!.full_name,
-          runId: run.id,
-          maxAttempts: 2,
-          delayMs: 2_000,
-        });
-
-        await recordIngestionEvent({
-          eventType: "github.workflow_run_test_backfill",
-          source: "github-app-webhook",
-          status: backfill.updated ? "processed" : "rejected",
-          repositoryFullName: payload.repository!.full_name,
-          externalRunId: run.id,
-          idempotencyKey: `github-workflow-run-test-backfill:${payload.repository!.full_name}:${run.id}`,
-          error: backfill.updated ? undefined : backfill.reason,
-          payload: backfill,
-        });
-
-        if (backfill.updated) {
-          revalidateTag("execution-snapshot", { expire: 0 });
-        }
-      } catch (error) {
-        console.warn("Unable to run synchronous test-signal backfill for workflow_run", error);
-      }
-    }
 
     return { processed: true, runId: run.id };
   }
 
-  if (
-    event === "workflow_job" &&
-    payload.action === "completed" &&
-    installationId &&
-    payload.repository &&
-    payload.workflow_job?.run_id
-  ) {
-    const workflowJob = payload.workflow_job;
-    const repositoryFullName = payload.repository.full_name;
-    const runAttempt = workflowJob.run_attempt ?? payload.workflow_run?.run_attempt ?? 1;
-    const runId = `${workflowJob.run_id}:${runAttempt}`;
 
-    console.log(`[execforge:webhook] workflow_job completed \u2014 repo=${repositoryFullName} runId=${runId} jobId=${workflowJob.id} jobName="${workflowJob.name}" conclusion=${workflowJob.conclusion}`);
-
-    // The workflow_job completed event fires only after the job is fully done —
-    // GitHub guarantees log files are finalized at this point. Run the test
-    // backfill synchronously with a single attempt so we don't need after() at all.
-    try {
-      const backfill = await backfillWorkflowRunTestsFromGitHub({
-        repositoryFullName,
-        runId,
-        maxAttempts: 1,
-        delayMs: 0,
-      });
-
-      console.log(`[execforge:webhook] workflow_job backfill result: ${JSON.stringify(backfill)}`);
-
-      await recordIngestionEvent({
-        eventType: "github.workflow_job_test_backfill",
-        source: "github-app-webhook",
-        status: backfill.updated ? "processed" : "rejected",
-        repositoryFullName,
-        externalRunId: runId,
-        idempotencyKey: `github-workflow-job-test-backfill:${repositoryFullName}:${runId}`,
-        error: backfill.updated ? undefined : backfill.reason,
-        payload: {
-          ...backfill,
-          jobId: workflowJob.id,
-          jobName: workflowJob.name,
-          conclusion: workflowJob.conclusion,
-        },
-      });
-
-      if (backfill.updated) {
-        revalidateTag("execution-snapshot", { expire: 0 });
-      }
-    } catch (error) {
-      console.warn("Unable to backfill test signals from workflow_job completed event", error);
-    }
-
-    return { processed: true, runId, jobId: workflowJob.id };
-  }
 
   return { processed: false };
 }

@@ -23,5 +23,7 @@ export const queryKeys = {
 
   /** Persisted AI narrative analysis for a single run */
   runAnalysis: (runId: string) => ["run-analysis", runId] as const,
-} as const;
 
+  /** Background test scaffold PR job */
+  testScaffoldJob: (jobId: string) => ["test-scaffold-job", jobId] as const,
+} as const;

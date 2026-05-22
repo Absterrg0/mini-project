@@ -13,7 +13,6 @@ import {
   GitHubAppConfigurationError,
   getRepositoryInstallationId,
   githubInstallationRequest,
-  loadTestsFromGitHubWorkflowRun,
   syncConnectedGitHubInstallations,
 } from "./github-app";
 import { prisma } from "./prisma";
@@ -943,12 +942,33 @@ export async function attachRuntimeTelemetry(params: {
     : startedAt;
   const durationSec = Math.max(0, Math.round((finishedAt.getTime() - startedAt.getTime()) / 1000));
   const status = params.telemetry.exitCode && params.telemetry.exitCode !== 0 ? "failed" : "success";
-  // Preserve any tests already written to this run (e.g. from a prior webhook event).
-  // Do NOT attempt to fetch tests from GitHub here — the SDK posts telemetry while the
-  // job is still in-progress, so the logs API will not yet contain test output.
-  // Test parsing is handled by the workflow_job completed webhook handler, which fires
-  // after the job is fully done and log files are guaranteed available.
-  const tests: unknown = Array.isArray(existingRun?.tests) ? existingRun.tests : [];
+
+  // Tests come directly from the SDK's JUnit XML parser — no log scraping needed.
+  // If the SDK sent tests, convert to TestSignal format. Otherwise keep any
+  // tests already stored for this run (from a previous webhook or SDK post).
+  const sdkTests = Array.isArray(params.telemetry.tests) && params.telemetry.tests.length > 0
+    ? params.telemetry.tests
+    : null;
+
+  let tests: unknown;
+  if (sdkTests) {
+    // Aggregate SDK tests into TestSignal format (name+file → aggregate stats)
+    const map = new Map<string, { name: string; file: string; runs: number; failures: number; retries: number; avgDurationSec: number }>();
+    for (const t of sdkTests) {
+      const key = `${t.file}::${t.name}`;
+      const current = map.get(key) ?? { name: t.name, file: t.file, runs: 0, failures: 0, retries: 0, avgDurationSec: 0 };
+      const nextRuns = current.runs + 1;
+      current.avgDurationSec = nextRuns > 0
+        ? (current.avgDurationSec * current.runs + t.durationSec) / nextRuns
+        : t.durationSec;
+      current.runs = nextRuns;
+      current.failures += t.failed ? 1 : 0;
+      map.set(key, current);
+    }
+    tests = [...map.values()];
+  } else {
+    tests = Array.isArray(existingRun?.tests) ? existingRun.tests : [];
+  }
 
   await prisma.$transaction([
     prisma.workflowRunSnapshot.upsert({
@@ -992,114 +1012,4 @@ export async function attachRuntimeTelemetry(params: {
   ]);
 
   return { attached: true, reason: null };
-}
-
-export async function backfillWorkflowRunTestsFromGitHub(params: {
-  repositoryFullName: string;
-  runId: string;
-  maxAttempts?: number;
-  delayMs?: number;
-}): Promise<{
-  updated: boolean;
-  reason:
-    | "updated"
-    | "already_has_tests"
-    | "repository_not_found"
-    | "run_not_found"
-    | "installation_not_found"
-    | "tests_not_found";
-  testCount: number;
-}> {
-  const repository = await prisma.executionRepository.findUnique({
-    where: {
-      fullName: params.repositoryFullName,
-    },
-    select: {
-      id: true,
-    },
-  });
-
-  if (!repository) {
-    console.log(`[execforge:backfill] repository_not_found for ${params.repositoryFullName}`);
-    return { updated: false, reason: "repository_not_found", testCount: 0 };
-  }
-
-  const installationId = await getRepositoryInstallationId(params.repositoryFullName);
-  if (!installationId) {
-    console.log(`[execforge:backfill] installation_not_found for ${params.repositoryFullName}`);
-    return { updated: false, reason: "installation_not_found", testCount: 0 };
-  }
-
-  const workflowRunId = params.runId.split(":")[0];
-  const maxAttempts = Math.max(1, params.maxAttempts ?? 4);
-  const delayMs = Math.max(0, params.delayMs ?? 7_500);
-  let sawRun = false;
-
-  console.log(`[execforge:backfill] starting — runId=${params.runId} workflowRunId=${workflowRunId} repo=${params.repositoryFullName} maxAttempts=${maxAttempts}`);
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (attempt > 1 && delayMs > 0) {
-      await wait(delayMs * attempt);
-    }
-
-    try {
-      const existingRun = await prisma.workflowRunSnapshot.findUnique({
-        where: {
-          externalRunId: params.runId,
-        },
-        select: {
-          repositoryId: true,
-          tests: true,
-        },
-      });
-
-      console.log(`[execforge:backfill] attempt ${attempt}: existingRun=${existingRun ? `found (repoId=${existingRun.repositoryId})` : "null"} expectedRepoId=${repository.id}`);
-
-      if (!existingRun || existingRun.repositoryId !== repository.id) {
-        console.log(`[execforge:backfill] attempt ${attempt}: run not found or repo mismatch, continuing`);
-        continue;
-      }
-
-      sawRun = true;
-      const existingTests = Array.isArray(existingRun.tests) ? existingRun.tests : [];
-      console.log(`[execforge:backfill] attempt ${attempt}: existingTests.length=${existingTests.length}`);
-
-      if (existingTests.length > 0) {
-        console.log(`[execforge:backfill] already_has_tests (${existingTests.length}), skipping`);
-        return { updated: false, reason: "already_has_tests", testCount: existingTests.length };
-      }
-
-      const tests = await loadTestsFromGitHubWorkflowRun({
-        installationId,
-        repositoryFullName: params.repositoryFullName,
-        workflowRunId,
-      });
-
-      console.log(`[execforge:backfill] attempt ${attempt}: loadTestsFromGitHubWorkflowRun returned ${tests.length} tests`);
-
-      if (tests.length === 0) {
-        continue;
-      }
-
-      await prisma.workflowRunSnapshot.update({
-        where: {
-          externalRunId: params.runId,
-        },
-        data: {
-          tests: toJson(tests),
-        },
-      });
-
-      console.log(`[execforge:backfill] ✓ wrote ${tests.length} tests to DB for runId=${params.runId}`);
-      return { updated: true, reason: "updated", testCount: tests.length };
-    } catch (error) {
-      if (attempt === maxAttempts) {
-        console.warn("[execforge:backfill] Unable to backfill test signals from GitHub job logs", error);
-      }
-    }
-  }
-
-  const reason = sawRun ? "tests_not_found" as const : "run_not_found" as const;
-  console.log(`[execforge:backfill] done — sawRun=${sawRun} reason=${reason}`);
-  return { updated: false, reason, testCount: 0 };
 }

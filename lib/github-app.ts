@@ -1,5 +1,4 @@
 import { createHmac, sign } from "node:crypto";
-import { get as httpsGet } from "node:https";
 import type { JobExecution, StepExecution, TestSignal, WorkflowRun } from "@/app/lib/types";
 import { prisma } from "@/lib/prisma";
 
@@ -58,12 +57,7 @@ interface GitHubWorkflowJobsResponse {
   jobs?: GitHubWorkflowJob[];
 }
 
-interface ParsedJUnitTest {
-  name: string;
-  file: string;
-  failed: boolean;
-  durationSec: number;
-}
+
 
 export interface GitHubWorkflowRunPayload {
   id: number;
@@ -220,74 +214,7 @@ export async function githubInstallationRequest<T>(
   return githubRequest<T>(path, token, init);
 }
 
-/**
- * Use Node.js's native https module (NOT patched by Next.js) to make the
- * initial request to a GitHub API endpoint and return the raw body or the
- * redirect Location if the server responds with a 3xx.
- *
- * This is necessary because Next.js patches the global `fetch` and silently
- * ignores `redirect: "manual"`, so we cannot use fetch to intercept GitHub's
- * 302 redirect to a presigned S3 URL.
- */
-function resolveGitHubRedirect(
-  url: string,
-  headers: Record<string, string>,
-): Promise<{ redirectUrl: string | null; status: number; body: string }> {
-  return new Promise((resolve) => {
-    const req = httpsGet(url, { headers }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        const isRedirect = res.statusCode !== undefined && res.statusCode >= 300 && res.statusCode < 400;
-        resolve({
-          redirectUrl: isRedirect ? (res.headers.location ?? null) : null,
-          status: res.statusCode ?? 0,
-          body,
-        });
-      });
-    });
-    req.on("error", (err) => resolve({ redirectUrl: null, status: 0, body: String(err) }));
-    req.setTimeout(20_000, () => { req.destroy(); resolve({ redirectUrl: null, status: 0, body: "timeout" }); });
-  });
-}
 
-async function githubInstallationText(
-  installationId: string | number,
-  path: string,
-  init: RequestInit = {},
-): Promise<{ ok: boolean; status: number; text: string }> {
-  const token = await getInstallationAccessToken(installationId);
-  const fullUrl = path.startsWith("https://") ? path : `${GITHUB_API_BASE}${path}`;
-
-  // Use Node's https module (unpatched by Next.js) to make the initial request.
-  // GitHub's /actions/jobs/{id}/logs endpoint returns a 302 to a presigned S3
-  // URL. Next.js's fetch wrapper ignores `redirect:"manual"`, so if we used
-  // fetch it would auto-follow the redirect — sending our Bearer token to S3
-  // which causes a SignatureDoesNotMatch error (the 158-byte response we observed).
-  const authHeaders: Record<string, string> = {
-    "User-Agent": "ExecForge-App",
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${token}`,
-    "X-GitHub-Api-Version": GITHUB_API_VERSION,
-  };
-
-  const initial = await resolveGitHubRedirect(fullUrl, authHeaders);
-  console.log(`[execforge:logs] resolveGitHubRedirect result: status=${initial.status} redirectUrl=${initial.redirectUrl ? "yes" : "no"} bodyLen=${initial.body.length} body=${initial.body.slice(0, 300)}`);
-
-  if (initial.redirectUrl) {
-    // Fetch the presigned S3 URL with NO auth headers — S3 presigned URLs are
-    // self-authenticating and reject additional auth headers.
-    console.log(`[execforge:logs] following redirect → S3 (status=${initial.status})`);
-    const s3 = await fetch(initial.redirectUrl);
-    const s3Text = await s3.text();
-    console.log(`[execforge:logs] S3 response: ok=${s3.ok} status=${s3.status} textLen=${s3Text.length}`);
-    return { ok: s3.ok, status: s3.status, text: s3Text };
-  }
-
-  const ok = initial.status >= 200 && initial.status < 300;
-  return { ok, status: initial.status, text: initial.body };
-}
 
 function orgFromRepository(repository: GitHubRepository): { slug: string; name: string } {
   return {
@@ -340,247 +267,6 @@ function mapStepStatus(conclusion?: string | null): StepExecution["status"] {
     return "retried";
   }
   return "failed";
-}
-
-function stripAnsi(value: string) {
-  return value.replace(/\u001b\[[0-9;]*m/g, "");
-}
-
-function normalizeLogLine(line: string) {
-  return stripAnsi(line)
-    .replace(/^\d{4}-\d{2}-\d{2}T[^\s]+\s+/, "")
-    .trimEnd();
-}
-
-/** Decode the five XML predefined entities. */
-function decodeXmlEntities(s: string): string {
-  return s
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'");
-}
-
-/**
- * Extract a single XML attribute value from a tag's attribute string.
- * Handles both double-quoted and single-quoted values.
- */
-function xmlAttr(attrs: string, name: string): string {
-  const re = new RegExp(`\\b${name}="([^"]*)"`, "i");
-  const dq = attrs.match(re);
-  if (dq?.[1] !== undefined) return decodeXmlEntities(dq[1]);
-  const sq = attrs.match(new RegExp(`\\b${name}='([^']*)'`, "i"));
-  return sq?.[1] !== undefined ? decodeXmlEntities(sq[1]) : "";
-}
-
-/**
- * Resolve the best possible file path from JUnit `file` and `classname` attributes.
- *
- * node --test --test-reporter=junit puts the absolute file path in `file`
- * (e.g. "/home/runner/work/repo/test/foo.test.js") and just "test" in `classname`.
- * We prefer `file`, strip the runner workspace prefix, and fall back through
- * `classname` to a slug derived from the test name.
- */
-function fileFromJUnit(fileAttr: string, classname: string, testName: string): string {
-  // Prefer the `file` attribute — it contains the absolute path on the runner.
-  if (fileAttr && fileAttr !== "[eval]") {
-    // Strip common GitHub Actions runner prefixes so we get a repo-relative path.
-    // Pattern: /home/runner/work/<repo>/<repo>/  or  /home/runner/work/_temp/*
-    const stripped = fileAttr
-      .replace(/\\/g, "/")
-      .replace(/^\/home\/runner\/work\/[^/]+\/[^/]+\//, "")
-      .replace(/^\/github\/workspace\//, "");
-    if (stripped && stripped !== fileAttr.replace(/\\/g, "/")) {
-      // Successfully stripped — return clean relative path
-      return stripped;
-    }
-    // Fall back to last two segments of the absolute path (e.g. test/foo.test.js)
-    const parts = fileAttr.replace(/\\/g, "/").split("/").filter(Boolean);
-    if (parts.length >= 2) return parts.slice(-2).join("/");
-    if (parts.length === 1) return parts[0];
-  }
-
-  // `classname` from non-node runners (Maven, pytest, etc.) uses dotted notation.
-  if (classname && classname !== "test" && classname !== "[eval]") {
-    if (classname.includes("/") || classname.includes("\\") || /\.[a-z]{2,5}$/.test(classname)) {
-      return classname.replace(/\\/g, "/");
-    }
-    // Dotted class name — convert to path (e.g. com.example.MyTest → com/example/MyTest.test)
-    if (classname.includes(".")) {
-      return classname.replace(/\./g, "/") + ".test";
-    }
-  }
-
-  // Last resort: derive a slug from the test name.
-  const slug = testName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 60);
-  return `tests/${slug || "unknown"}.test.js`;
-}
-
-/**
- * Find and return the raw `<testsuites>…</testsuites>` XML block embedded
- * in a GitHub Actions job log (which has per-line ISO-8601 timestamps).
- * Returns null if no JUnit XML is found.
- */
-function extractJUnitXml(log: string): string | null {
-  const text = log.split(/\r?\n/).map(normalizeLogLine).join("\n");
-  const openIdx = text.search(/<testsuites[\s>]/);
-  if (openIdx === -1) {
-    console.log(`[execforge:tests] extractJUnitXml — no <testsuites> found in ${text.length} char log`);
-    return null;
-  }
-  const closeTag = "</testsuites>";
-  const closeIdx = text.indexOf(closeTag, openIdx);
-  if (closeIdx === -1) {
-    console.log(`[execforge:tests] extractJUnitXml — found <testsuites> at ${openIdx} but no closing tag`);
-    return null;
-  }
-  const xml = text.slice(openIdx, closeIdx + closeTag.length);
-  console.log(`[execforge:tests] extractJUnitXml — extracted ${xml.length} chars of XML`);
-  return xml;
-}
-
-/**
- * Parse JUnit XML produced by `node --test --test-reporter=junit`
- * (or any standard JUnit-compatible reporter) from a raw job log string.
- *
- * Handles:
- * - Self-closing testcase elements (passing tests from node:test)
- * - Regular testcase elements with <failure> or <error> children
- * - XML entities in attribute values
- */
-function parseJUnitXmlFromLog(log: string): ParsedJUnitTest[] {
-  const xml = extractJUnitXml(log);
-  if (!xml) return [];
-
-  const tests: ParsedJUnitTest[] = [];
-
-  // Match both self-closing `<testcase ... />` and paired `<testcase ...>...</testcase>`
-  const re = /<testcase\b([^>]*?)(\/?>)([\s\S]*?(?=<testcase\b|<\/testsuites))/g;
-  let m: RegExpExecArray | null;
-
-  while ((m = re.exec(xml)) !== null) {
-    const attrs  = m[1];           // everything inside the opening tag
-    const selfClose = m[2] === "/>";
-    const body   = selfClose ? "" : m[3]; // content between open and next <testcase / </testsuites>
-
-    const name      = xmlAttr(attrs, "name");
-    const fileAttr  = xmlAttr(attrs, "file");
-    const classname = xmlAttr(attrs, "classname");
-    const timeStr   = xmlAttr(attrs, "time");
-
-    if (!name) continue;
-
-    // A test is failed if the element carries a failure/error attribute OR
-    // contains a <failure> or <error> child element.
-    const failed =
-      xmlAttr(attrs, "failure").length > 0 ||
-      /<failure[\s/>]/i.test(body) ||
-      /<error[\s/>]/i.test(body);
-
-    const durationSec = parseFloat(timeStr);
-
-    tests.push({
-      name,
-      file: fileFromJUnit(fileAttr, classname, name),
-      failed,
-      durationSec: Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : 0,
-    });
-  }
-
-  return tests;
-}
-
-function aggregateParsedTests(tests: ParsedJUnitTest[]): TestSignal[] {
-  const map = new Map<string, TestSignal>();
-
-  for (const test of tests) {
-    const key = `${test.file}::${test.name}`;
-    const current = map.get(key) ?? {
-      name: test.name,
-      file: test.file,
-      runs: 0,
-      failures: 0,
-      retries: 0,
-      avgDurationSec: 0,
-    };
-    const nextRuns = current.runs + 1;
-    current.avgDurationSec =
-      nextRuns > 0
-        ? (current.avgDurationSec * current.runs + test.durationSec) / nextRuns
-        : test.durationSec;
-    current.runs = nextRuns;
-    current.failures += test.failed ? 1 : 0;
-    map.set(key, current);
-  }
-
-  return [...map.values()];
-}
-
-async function parseTestsFromWorkflowJobLogs(params: {
-  installationId: string | number;
-  owner: string;
-  repo: string;
-  jobs: GitHubWorkflowJob[];
-}) {
-  const parsed: ParsedJUnitTest[] = [];
-  console.log(`[execforge:tests] parseTestsFromWorkflowJobLogs — ${params.jobs.length} jobs for ${params.owner}/${params.repo}`);
-
-  for (const job of params.jobs) {
-    console.log(`[execforge:tests] job ${job.id} name="${job.name}" completed_at=${job.completed_at ?? "null"} conclusion=${job.conclusion ?? "null"}`);
-    if (!job.completed_at) {
-      console.log(`[execforge:tests] job ${job.id} skipped — not yet completed`);
-      continue;
-    }
-
-    try {
-      const response = await githubInstallationText(
-        params.installationId,
-        `/repos/${params.owner}/${params.repo}/actions/jobs/${job.id}/logs`,
-      );
-      console.log(`[execforge:tests] job ${job.id} logs fetch: ok=${response.ok} status=${response.status} textLen=${response.text?.length ?? 0}`);
-      if (!response.ok || !response.text) {
-        console.log(`[execforge:tests] job ${job.id} ERROR body: ${response.text?.slice(0, 500)}`);
-        continue;
-      }
-      const jobTests = parseJUnitXmlFromLog(response.text);
-      console.log(`[execforge:tests] job ${job.id} parsed ${jobTests.length} tests from JUnit XML`);
-      if (jobTests.length === 0) {
-        // Print the first 500 chars of the log to show what we got
-        console.log(`[execforge:tests] job ${job.id} log sample (first 500 chars):`, response.text.slice(0, 500));
-      }
-      parsed.push(...jobTests);
-    } catch (error) {
-      console.warn(`[execforge:tests] Unable to parse tests from GitHub job ${job.id} logs`, error);
-    }
-  }
-
-  const aggregated = aggregateParsedTests(parsed);
-  console.log(`[execforge:tests] parseTestsFromWorkflowJobLogs — aggregated to ${aggregated.length} test signals`);
-  return aggregated;
-}
-
-export async function loadTestsFromGitHubWorkflowRun(params: {
-  installationId: string | number;
-  repositoryFullName: string;
-  workflowRunId: string | number;
-}) {
-  const [owner, repo] = params.repositoryFullName.split("/");
-  const jobsPayload = await githubInstallationFetch<GitHubWorkflowJobsResponse>(
-    params.installationId,
-    `/repos/${owner}/${repo}/actions/runs/${params.workflowRunId}/jobs?per_page=100`,
-  );
-
-  return parseTestsFromWorkflowJobLogs({
-    installationId: params.installationId,
-    owner,
-    repo,
-    jobs: jobsPayload.jobs ?? [],
-  });
 }
 
 function mapRepositoryDefaults(repository: GitHubRepository) {
@@ -804,8 +490,7 @@ export async function workflowRunFromGitHub(params: {
     `/repos/${owner}/${repo}/actions/runs/${params.workflowRun.id}/jobs?per_page=100`,
   );
   const githubJobs = jobsPayload.jobs ?? [];
-  const [jobs, tests] = await Promise.all([
-    Promise.resolve(githubJobs.map((job): JobExecution => {
+  const jobs: JobExecution[] = githubJobs.map((job): JobExecution => {
     const durationSec = secondsBetween(job.started_at, job.completed_at);
     return {
       id: String(job.id),
@@ -833,13 +518,9 @@ export async function workflowRunFromGitHub(params: {
           };
         }) ?? [],
     };
-    })),
-    loadTestsFromGitHubWorkflowRun({
-      installationId: params.installationId,
-      repositoryFullName: params.repository.full_name,
-      workflowRunId: params.workflowRun.id,
-    }),
-  ]);
+  });
+  // Tests are now uploaded directly by the SDK finish action — no log scraping needed.
+  const tests: TestSignal[] = [];
 
   const startedAt =
     params.workflowRun.run_started_at ??

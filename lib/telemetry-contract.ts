@@ -142,6 +142,27 @@ export function validateRuntimeTelemetry(value: unknown): ValidationResult<Runti
       })
     : undefined;
 
+  const tests: RuntimeTelemetry["tests"] = Array.isArray(value.tests)
+    ? value.tests.flatMap((t) => {
+        if (
+          !isObject(t) ||
+          typeof t.name !== "string" ||
+          typeof t.file !== "string"
+        ) {
+          return [];
+        }
+        return [
+          {
+            name: t.name,
+            file: t.file,
+            durationSec: asFiniteNumber(t.durationSec) ?? 0,
+            failed: t.failed === true,
+            failureMessage: typeof t.failureMessage === "string" ? t.failureMessage : undefined,
+          },
+        ];
+      })
+    : undefined;
+
   return {
     ok: true,
     value: {
@@ -183,6 +204,7 @@ export function validateRuntimeTelemetry(value: unknown): ValidationResult<Runti
           })
         : undefined,
       annotations,
+      tests,
     },
   };
 }

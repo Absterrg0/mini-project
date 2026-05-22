@@ -8,6 +8,7 @@ import {
   useQueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
+import { useState } from "react";
 import { toast } from "sonner";
 import { queryKeys } from "./queryKeys";
 import type { TokenSummary } from "@/components/settings/settings-client";
@@ -57,11 +58,13 @@ async function fetchTokens(organizationId: string): Promise<TokenSummary[]> {
 }
 
 export function useTokens(organizationId: string, initialData?: TokenSummary[]) {
+  const [initialDataUpdatedAt] = useState(() => Date.now());
+
   return useQuery<TokenSummary[]>({
     queryKey: queryKeys.tokens(organizationId),
     queryFn: () => fetchTokens(organizationId),
     initialData,
-    initialDataUpdatedAt: initialData ? Date.now() : undefined,
+    initialDataUpdatedAt: initialData ? initialDataUpdatedAt : undefined,
     staleTime: 30_000,
     gcTime: 10 * 60_000,
     enabled: !!organizationId,
@@ -347,6 +350,8 @@ export interface AnalyzeRunPayload {
 
 /** Fetch the persisted narrative analysis for a run (no AI call). */
 export function useRunAnalysis(runId: string, initialData?: RunAnalysisResult | null) {
+  const [initialDataUpdatedAt] = useState(() => Date.now());
+
   return useQuery<RunAnalysisResult | null>({
     queryKey: queryKeys.runAnalysis(runId),
     queryFn: async () => {
@@ -356,7 +361,7 @@ export function useRunAnalysis(runId: string, initialData?: RunAnalysisResult | 
       return data.analysis ?? null;
     },
     initialData: initialData !== undefined ? initialData : undefined,
-    initialDataUpdatedAt: initialData !== undefined ? Date.now() : undefined,
+    initialDataUpdatedAt: initialData !== undefined ? initialDataUpdatedAt : undefined,
     staleTime: 60_000,
     gcTime: 10 * 60_000,
     enabled: !!runId,
@@ -399,6 +404,9 @@ export interface GenerateTestsPRPayload {
 }
 
 export interface GenerateTestsPRResult {
+  jobId: string;
+  status: "pending" | "running" | "completed" | "failed";
+  error?: string | null;
   draftOnly: boolean;
   files: Array<{ path: string; content: string; summary: string }>;
   branchName: string | null;
@@ -423,3 +431,24 @@ export function useGenerateTestsPR() {
   });
 }
 
+async function fetchTestScaffoldJob(jobId: string): Promise<GenerateTestsPRResult> {
+  const res = await fetch(`/api/test-scaffold-pr?jobId=${encodeURIComponent(jobId)}`);
+  const data = await res.json() as GenerateTestsPRResult & { error?: string };
+  if (!res.ok || (data.error && data.status !== "failed")) {
+    throw new Error(data.error ?? "Failed to load scaffold job.");
+  }
+  return data;
+}
+
+export function useTestScaffoldJob(jobId: string | null) {
+  return useQuery<GenerateTestsPRResult>({
+    queryKey: queryKeys.testScaffoldJob(jobId ?? ""),
+    queryFn: () => fetchTestScaffoldJob(jobId as string),
+    enabled: Boolean(jobId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "completed" || status === "failed" ? false : 2_000;
+    },
+    gcTime: 10 * 60_000,
+  });
+}
