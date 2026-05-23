@@ -8,6 +8,7 @@ import { generateText } from "ai";
 import { getCleanErrorMessage } from "@/lib/api-errors";
 import { parseJsonWithRepair } from "@/lib/json-model-parse";
 import type { WorkflowRun, RepositoryProfile } from "@/app/lib/types";
+import { formatCapturedTestFailures } from "@/lib/ai-prompt-context";
 
 interface RequestBody {
   repositoryFullName?: string;
@@ -123,6 +124,9 @@ ${run.changedFiles.slice(0, 20).join("\n") || "No changed files captured"}
 
 ## Step Names (for pattern detection)
 ${stepNames.slice(0, 30).join(", ") || "None"}
+
+## Test failures (JUnit — failure messages for root-cause analysis)
+${formatCapturedTestFailures(run)}
 
 Now analyze this data and return your JSON response. Only include issues that are NOT already covered by:
 - Cache optimization (actions/cache@v4)

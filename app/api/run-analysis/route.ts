@@ -7,6 +7,7 @@ import { COOKIE_NAME, type AISettings, buildAIModel } from "@/lib/ai-provider";
 import { generateText } from "ai";
 import { getCleanErrorMessage } from "@/lib/api-errors";
 import type { WorkflowRun, RepositoryProfile } from "@/app/lib/types";
+import { formatCapturedTestFailures } from "@/lib/ai-prompt-context";
 
 interface RequestBody {
   repositoryFullName?: string;
@@ -34,10 +35,12 @@ Explain the run's performance profile in natural language:
 - Write for a senior engineer audience. No fluff, no hedging, no generic advice.
 - If data is sparse (no runtime telemetry), say so clearly and focus on what IS available (job durations, steps, status).
 - Do NOT repeat back every metric verbatim — synthesize and explain.
+- When test failures are listed with messages, explain likely root causes and which step/job they belong to.
 
 ## STRUCTURE
 Use this structure (omit sections if no data):
 ## Run Summary
+## Test & Failure Analysis
 ## CPU & Memory Analysis
 ## Job & Step Breakdown
 ## Anomalies & Patterns
@@ -115,6 +118,9 @@ ${slowestSteps.map((s) => `- [${s.job}] ${s.step}: ${s.durationSec}s`).join("\n"
 
 ## Changed Files (${run.changedFiles.length})
 ${run.changedFiles.slice(0, 15).join("\n") || "None captured"}
+
+## Test failures (JUnit messages from SDK)
+${formatCapturedTestFailures(run)}
 
 ## Fleet Context (${allRuns.length} runs)
 - Failed runs: ${allRuns.filter((r) => r.status === "failed").length}

@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -34,7 +34,16 @@ jobs:
         run: npm ci
 
       - name: Build & test
-        run: npm run build && npm test`;
+        env:
+          CI: true
+        run: npm run build && npm test
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}
+          # Discovers junit-results.xml from jest-junit for AI failure analysis`;
 
 const E2E_WORKFLOW = `name: E2E Tests
 
@@ -47,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -62,7 +71,16 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run E2E tests
-        run: npx playwright test`;
+        env:
+          CI: true
+        run: npx playwright test
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}
+          EXECFORGE_JUNIT_PATH: test-results/junit.xml`;
 
 const MATRIX_WORKFLOW = `name: Sharded E2E
 
@@ -78,7 +96,7 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -90,7 +108,16 @@ jobs:
         run: npm ci && npx playwright install --with-deps chromium
 
       - name: Run shard \${{ matrix.shard }}/4
-        run: npx playwright test --shard=\${{ matrix.shard }}/4`;
+        env:
+          CI: true
+        run: npx playwright test --shard=\${{ matrix.shard }}/4
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}
+          EXECFORGE_JUNIT_PATH: test-results/junit.xml`;
 
 const DOCKER_WORKFLOW = `name: Docker Build
 
@@ -103,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
 
@@ -112,7 +139,13 @@ jobs:
 
       - name: Build image
         run: |
-          docker buildx build --cache-from=type=gha --cache-to=type=gha,mode=max -t myapp:latest .`;
+          docker buildx build --cache-from=type=gha --cache-to=type=gha,mode=max -t myapp:latest .
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}`;
 
 const PROPER_TESTS_WORKFLOW = `name: Proper Tests
 
@@ -125,7 +158,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -137,7 +170,16 @@ jobs:
         run: npm ci
 
       - name: Run solid tests
-        run: npm run test:unit`;
+        env:
+          CI: true
+        run: npm run test:unit
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}
+          # Discovers junit-results.xml from jest-junit for AI failure analysis`;
 
 const FLAKY_TESTS_WORKFLOW = `name: Flaky Tests
 
@@ -150,7 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -162,7 +204,16 @@ jobs:
         run: npm ci
 
       - name: Run flaky tests
-        run: npm run test:flaky`;
+        env:
+          CI: true
+        run: npm run test:flaky
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}
+          # Discovers junit-results.xml from jest-junit for AI failure analysis`;
 
 const FAILED_TESTS_WORKFLOW = `name: Failed Tests
 
@@ -175,7 +226,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -187,7 +238,16 @@ jobs:
         run: npm ci
 
       - name: Run failing tests
-        run: npm run test:fail`;
+        env:
+          CI: true
+        run: npm run test:fail
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}
+          # Discovers junit-results.xml — failure messages power AI root-cause analysis`;
 
 const LINT_WORKFLOW = `name: Linting
 
@@ -200,7 +260,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -212,7 +272,13 @@ jobs:
         run: npm ci
 
       - name: Run linter
-        run: npm run lint`;
+        run: npm run lint
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}`;
 
 const SECURITY_SCAN_WORKFLOW = `name: Security Scan
 
@@ -225,7 +291,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -237,7 +303,13 @@ jobs:
         run: npm ci
 
       - name: Audit dependencies
-        run: npm audit`;
+        run: npm audit
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}`;
 
 const MOBILE_TESTS_WORKFLOW = `name: Mobile Tests
 
@@ -250,7 +322,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Absterrg0/execforge-runtime@v1
+      - uses: Absterrg0/execforge-runtime/start@v1
         env:
           EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
       - uses: actions/setup-node@v4
@@ -262,7 +334,16 @@ jobs:
         run: npm ci
 
       - name: Run React Native tests
-        run: npm run test:mobile`;
+        env:
+          CI: true
+        run: npm run test:mobile
+
+      - uses: Absterrg0/execforge-runtime/finish@v1
+        if: always()
+        env:
+          EXECFORGE_API_TOKEN: \${{ secrets.EXECFORGE_API_TOKEN }}
+          EXECFORGE_JOB_STATUS: \${{ job.status }}
+          # Discovers junit-results.xml from jest-junit for AI failure analysis`;
 
 const FLAKY_JEST = `// jest.config.ts
 import type { Config } from 'jest';
@@ -274,7 +355,19 @@ const config: Config = {
   // Randomise order to surface order-dependent failures
   randomize: true,
 
-  reporters: ['default'],
+  // Human-readable CI logs + JUnit for ExecForge finish (failure messages → AI analysis)
+  reporters: [
+    'default',
+    [
+      'jest-junit',
+      {
+        outputDirectory: '.',
+        outputName: 'junit-results.xml',
+        includeShortConsoleOutput: true,
+        classNameTemplate: '{filepath}',
+      },
+    ],
+  ],
 };
 
 export default config;`;
@@ -284,18 +377,25 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   // Retry flaky specs — ExecForge counts retries per test
-  retries: 2,
+  retries: process.env.CI ? 2 : 0,
 
   // Run files in parallel for faster wall-clock time
   fullyParallel: true,
 
-  reporter: 'list',
+  // list + github for readable Actions logs; junit for ExecForge / AI failure analysis
+  reporter: process.env.CI
+    ? [
+        ['list'],
+        ['junit', { outputFile: 'test-results/junit.xml' }],
+        ['github'],
+      ]
+    : 'list',
 
   use: {
     baseURL: 'http://localhost:3000',
-    // Capture trace on first retry to help debug flakiness
-    trace: 'on-first-retry',
+    trace: process.env.CI ? 'retain-on-failure' : 'on-first-retry',
     screenshot: 'only-on-failure',
+    video: process.env.CI ? 'retain-on-failure' : 'off',
   },
 });`;
 
@@ -303,11 +403,11 @@ const PACKAGE_JSON_EXAMPLE = `{
   "name": "your-app",
   "private": true,
   "scripts": {
-    "test": "jest",
-    "test:unit": "jest --testPathPatterns=unit",
-    "test:flaky": "jest --testPathPatterns=flaky",
-    "test:fail": "jest --testPathPatterns=fail",
-    "test:mobile": "jest --selectProjects native",
+    "test": "jest --ci",
+    "test:unit": "jest --ci --testPathPatterns=unit",
+    "test:flaky": "jest --ci --testPathPatterns=flaky",
+    "test:fail": "jest --ci --testPathPatterns=fail",
+    "test:mobile": "jest --ci --selectProjects native",
     "build": "tsc -b",
     "lint": "eslint ."
   },
@@ -316,6 +416,7 @@ const PACKAGE_JSON_EXAMPLE = `{
     "@types/jest": "^29.5.0",
     "eslint": "^9.0.0",
     "jest": "^29.7.0",
+    "jest-junit": "^16.0.0",
     "typescript": "^5.6.0"
   }
 }`;
@@ -326,7 +427,10 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     // Retries surface flake signals ExecForge can aggregate from telemetry
-    retry: 2,
+    retry: process.env.CI ? 2 : 0,
+    reporters: process.env.CI
+      ? ['default', ['junit', { outputFile: 'junit-results.xml' }]]
+      : ['default'],
   },
 });`;
 
@@ -336,7 +440,7 @@ const WORKFLOW_EXAMPLES = [
   {
     id: "basic-ci",
     title: "Basic CI",
-    description: "Wrap your standard build & test pipeline. Captures duration, CPU, memory, exit code, and test signals.",
+    description: "Build & test with JUnit export (jest-junit → junit-results.xml). Finish ingests failure messages for AI analysis.",
     filename: ".github/workflows/ci.yml",
     code: BASIC_WORKFLOW,
     tags: ["npm", "jest", "beginner"],
@@ -345,7 +449,7 @@ const WORKFLOW_EXAMPLES = [
   {
     id: "playwright-e2e",
     title: "Playwright E2E",
-    description: "End-to-end tests with Playwright. ExecForge captures per-spec pass/fail, retries, and duration.",
+    description: "Playwright with list/github/junit reporters. Set EXECFORGE_JUNIT_PATH on finish for per-spec failure messages.",
     filename: ".github/workflows/e2e.yml",
     code: E2E_WORKFLOW,
     tags: ["playwright", "e2e"],
@@ -430,7 +534,7 @@ const CONFIG_EXAMPLES = [
     id: "package-json",
     title: "package.json (scripts)",
     description:
-      "Illustrative scripts only — rename or split to match your repo. Every npm run line in the workflow must resolve here (or in another manifest you actually use).",
+      "Use jest --ci and jest-junit so finish writes junit-results.xml with failure messages. Every npm run in the workflow must resolve here.",
     filename: "package.json",
     code: PACKAGE_JSON_EXAMPLE,
     tags: ["npm", "beginner"],
@@ -526,6 +630,9 @@ export default function ExamplesPage() {
             <h1 className="text-xl font-semibold tracking-tight">Ready-to-use examples</h1>
             <p className="text-sm text-muted-foreground mt-1">
               These are copy-paste snippets for your GitHub repo. ExecForge does not edit the remote repository for you.
+              Use the start/finish actions plus JUnit output (jest-junit or Playwright junit reporter) so the finish
+              step ingests per-test failure messages — that feeds AI scan and run analysis in the dashboard.
+              Pair with the Scripts & configs tab (jest-junit / Playwright junit reporter).
               Create an{" "}
               <code className="font-mono text-[11px] bg-secondary border border-border px-1.5 py-0.5">
                 EXECFORGE_API_TOKEN
